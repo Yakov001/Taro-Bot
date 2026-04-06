@@ -28,7 +28,7 @@ venv.bak/
 
 # Environment variables / secrets
 *.env
-.env.*
+.env
 config.ini
 secrets.json
 secrets.yaml
@@ -39,6 +39,7 @@ token.txt
 bot_token.txt
 *.session
 *.session-journal
+*.db
 
 # Logs
 *.log

@@ -1,16 +1,38 @@
-# This is a sample Python script.
+import asyncio
+import logging
 
-# Press Shift+F10 to execute it or replace it with your code.
-# Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
+from aiogram import Bot, Dispatcher
+
+from config import BOT_TOKEN
+from db import init_db
+from handlers import router
+from middlewares import AntifloodMiddleware
 
 
-def print_hi(name):
-    # Use a breakpoint in the code line below to debug your script.
-    print(f'Hi, {name}')  # Press Ctrl+F8 to toggle the breakpoint.
+async def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+    await init_db()
+    logging.info("Database initialized, 78 cards seeded")
+
+    bot = Bot(token=BOT_TOKEN)
+    dp = Dispatcher()
+
+    antiflood = AntifloodMiddleware()
+    dp.message.middleware(antiflood)
+    dp.callback_query.middleware(antiflood)
+
+    dp.include_router(router)
+
+    logging.info("Bot starting...")
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
 
 
-# Press the green button in the gutter to run the script.
-if __name__ == '__main__':
-    print_hi('PyCharm')
-
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/
+if __name__ == "__main__":
+    asyncio.run(main())
