@@ -26,22 +26,20 @@ SYSTEM_PROMPT = (
     "(прошлое, настоящее, будущее). Твоя задача — дать связное, тёплое и вдохновляющее "
     "толкование расклада, привязав каждую карту к вопросу пользователя. "
     "Ответ должен быть на русском языке, 4-6 предложений. Не повторяй вопрос дословно. "
-    "Не упоминай, что ты ИИ."
+    "Не упоминай, что ты ИИ. Добавь эмодзи в ответ."
 )
 
 
-async def interpret_spread(
-    question: str,
-    cards: list[dict],
-) -> str | None:
-    labels = ["Прошлое", "Настоящее", "Будущее"]
-    cards_text = "\n".join(
-        f"{label}: {card['name']} — {card['meaning_short']}"
-        for label, card in zip(labels, cards)
-    )
+THEME_SYSTEM_PROMPT = (
+    "Ты — мудрый и чуткий таролог. Пользователь выбрал тему «{theme}» и вытянул три карты Таро "
+    "(прошлое, настоящее, будущее). Твоя задача — дать связное, тёплое и вдохновляющее "
+    "толкование расклада, привязав каждую карту к выбранной теме. "
+    "Ответ должен быть на русском языке, 4-6 предложений. "
+    "Не упоминай, что ты ИИ. Используй эмодзи."
+)
 
-    user_prompt = f"Вопрос: {question}\n\nКарты:\n{cards_text}"
 
+async def _call_yandex(system_prompt: str, user_prompt: str) -> str | None:
     try:
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(
@@ -49,7 +47,7 @@ async def interpret_spread(
             lambda: _get_client().responses.create(
                 model=f"gpt://{YANDEX_FOLDER_ID}/{YANDEX_MODEL}",
                 input=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.7,
@@ -60,3 +58,22 @@ async def interpret_spread(
     except Exception:
         logger.error("YandexGPT request failed", exc_info=True)
         return None
+
+
+def _format_cards(cards: list[dict]) -> str:
+    labels = ["Прошлое", "Настоящее", "Будущее"]
+    return "\n".join(
+        f"{label}: {card['name']} — {card['meaning_short']}"
+        for label, card in zip(labels, cards)
+    )
+
+
+async def interpret_spread(question: str, cards: list[dict]) -> str | None:
+    user_prompt = f"Вопрос: {question}\n\nКарты:\n{_format_cards(cards)}"
+    return await _call_yandex(SYSTEM_PROMPT, user_prompt)
+
+
+async def interpret_theme(theme: str, cards: list[dict]) -> str | None:
+    system = THEME_SYSTEM_PROMPT.format(theme=theme)
+    user_prompt = f"Тема: {theme}\n\nКарты:\n{_format_cards(cards)}"
+    return await _call_yandex(system, user_prompt)
