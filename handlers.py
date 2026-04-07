@@ -2,6 +2,8 @@ import logging
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     FSInputFile,
     Message,
@@ -11,6 +13,7 @@ from aiogram.types import (
 
 import db
 from config import ADMIN_USER_ID, IMAGES_DIR
+from yandex_gpt import interpret_spread
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -18,21 +21,26 @@ logger = logging.getLogger(__name__)
 _main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Карта дня"), KeyboardButton(text="Расклад 3 карты")],
+        [KeyboardButton(text="Расклад с вопросом")],
     ],
     resize_keyboard=True,
 )
+
+
+class SpreadQuestion(StatesGroup):
+    waiting_for_question = State()
 
 
 # ── /start ──────────────────────────────────────────────
 
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
-    user = await db.get_or_create_user(message.from_user.id)
+    await db.get_or_create_user(message.from_user.id)
     text = (
         "Привет! Я простой таролог-бот.\n"
         "Карта дня — /day\n"
         "Расклад на прошлое-настоящее-будущее — /spread\n"
-        f"У тебя осталось {user['spreads_remaining']} бесплатных раскладов."
+        "Расклад с вопросом (ИИ-толкование) — /question"
     )
     await message.answer(text, reply_markup=_main_keyboard)
 
@@ -65,17 +73,9 @@ async def cmd_spread(message: Message, bot: Bot) -> None:
 
 
 async def _send_spread(message: Message, bot: Bot, user_id: int) -> None:
-    user = await db.get_or_create_user(user_id)
-
-    if user["spreads_remaining"] <= 0:
-        await message.answer(
-            "У тебя закончились бесплатные расклады.\n"
-            "Карта дня (/day) доступна всегда. Полная версия бота — скоро!"
-        )
-        return
+    await db.get_or_create_user(user_id)
 
     cards = await db.get_random_cards(3)
-    remaining = await db.decrement_spreads(user_id)
 
     labels = ["Прошлое", "Настоящее", "Будущее"]
     lines = []
@@ -83,8 +83,46 @@ async def _send_spread(message: Message, bot: Bot, user_id: int) -> None:
         await db.log_draw(user_id, card["id"], "spread")
         lines.append(f"{label}: {card['name']} — {card['meaning_short']}")
 
-    lines.append(f"\nОсталось раскладов: {remaining}")
     await message.answer("\n\n".join(lines))
+
+
+# ── Расклад с вопросом (AI) ─────────────────────────────
+
+@router.message(Command("question"))
+@router.message(F.text == "Расклад с вопросом")
+async def cmd_question_spread(message: Message, state: FSMContext) -> None:
+    await db.get_or_create_user(message.from_user.id)
+    await state.set_state(SpreadQuestion.waiting_for_question)
+    await message.answer("Задай свой вопрос, и я сделаю расклад с толкованием:")
+
+
+@router.message(SpreadQuestion.waiting_for_question)
+async def handle_question(message: Message, bot: Bot, state: FSMContext) -> None:
+    await state.clear()
+    question = message.text
+    if not question:
+        await message.answer("Пожалуйста, напиши вопрос текстом.")
+        return
+
+    user_id = message.from_user.id
+    await db.get_or_create_user(user_id)
+
+    cards = await db.get_random_cards(3)
+
+    labels = ["Прошлое", "Настоящее", "Будущее"]
+    lines = []
+    for label, card in zip(labels, cards):
+        await db.log_draw(user_id, card["id"], "spread")
+        lines.append(f"{label}: {card['name']} — {card['meaning_short']}")
+
+    await message.answer("\n\n".join(lines))
+
+    await message.answer("Толкую карты...")
+    ai_text = await interpret_spread(question, cards)
+    if ai_text:
+        await message.answer(f"Толкование расклада:\n\n{ai_text}")
+    else:
+        await message.answer("Не удалось получить толкование. Попробуйте позже.")
 
 
 # ── /reset (admin) ──────────────────────────────────────
