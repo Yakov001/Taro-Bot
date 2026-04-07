@@ -3,11 +3,10 @@ import logging
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
-    CallbackQuery,
     FSInputFile,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
     Message,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
 )
 
 import db
@@ -16,12 +15,12 @@ from config import ADMIN_USER_ID, IMAGES_DIR
 router = Router()
 logger = logging.getLogger(__name__)
 
-_main_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-    [
-        InlineKeyboardButton(text="Карта дня", callback_data="day"),
-        InlineKeyboardButton(text="Расклад 3 карты", callback_data="spread"),
-    ]
-])
+_main_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="Карта дня"), KeyboardButton(text="Расклад 3 карты")],
+    ],
+    resize_keyboard=True,
+)
 
 
 # ── /start ──────────────────────────────────────────────
@@ -41,14 +40,9 @@ async def cmd_start(message: Message) -> None:
 # ── /day ────────────────────────────────────────────────
 
 @router.message(Command("day"))
+@router.message(F.text == "Карта дня")
 async def cmd_day(message: Message, bot: Bot) -> None:
     await _send_day_card(message, bot, message.from_user.id)
-
-
-@router.callback_query(F.data == "day")
-async def cb_day(callback: CallbackQuery, bot: Bot) -> None:
-    await callback.answer()
-    await _send_day_card(callback.message, bot, callback.from_user.id)
 
 
 async def _send_day_card(message: Message, bot: Bot, user_id: int) -> None:
@@ -65,14 +59,9 @@ async def _send_day_card(message: Message, bot: Bot, user_id: int) -> None:
 # ── /spread ─────────────────────────────────────────────
 
 @router.message(Command("spread"))
+@router.message(F.text == "Расклад 3 карты")
 async def cmd_spread(message: Message, bot: Bot) -> None:
     await _send_spread(message, bot, message.from_user.id)
-
-
-@router.callback_query(F.data == "spread")
-async def cb_spread(callback: CallbackQuery, bot: Bot) -> None:
-    await callback.answer()
-    await _send_spread(callback.message, bot, callback.from_user.id)
 
 
 async def _send_spread(message: Message, bot: Bot, user_id: int) -> None:
