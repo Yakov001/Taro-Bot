@@ -40,6 +40,17 @@ async def init_db() -> None:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                package_id TEXT NOT NULL,
+                stars_amount INTEGER NOT NULL,
+                readings_granted INTEGER NOT NULL,
+                telegram_payment_charge_id TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         await db.commit()
         await _seed_cards(db)
 
@@ -135,6 +146,37 @@ async def reset_user_spreads(user_id: int) -> bool:
         )
         await db.commit()
         return cursor.rowcount > 0
+
+
+async def add_ai_requests(user_id: int, amount: int) -> int:
+    """Add AI requests to user balance. Returns new balance."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET ai_requests_remaining = ai_requests_remaining + ? WHERE user_id = ?",
+            (amount, user_id),
+        )
+        await db.commit()
+        cursor = await db.execute(
+            "SELECT ai_requests_remaining FROM users WHERE user_id = ?", (user_id,)
+        )
+        (remaining,) = await cursor.fetchone()
+        return remaining
+
+
+async def log_payment(
+    user_id: int,
+    package_id: str,
+    stars_amount: int,
+    readings_granted: int,
+    telegram_payment_charge_id: str,
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO payments (user_id, package_id, stars_amount, readings_granted, telegram_payment_charge_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (user_id, package_id, stars_amount, readings_granted, telegram_payment_charge_id),
+        )
+        await db.commit()
 
 
 async def update_card_file_id(card_id: int, file_id: str) -> None:

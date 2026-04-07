@@ -23,7 +23,7 @@ Telegram tarot bot MVP. Validate the hypothesis: users want quick Tarot spreads 
 ## Project structure
 - `main.py` — entry point (currently a placeholder)
 
-## Database schema (3 tables)
+## Database schema (4 tables)
 
 ### users
 ```sql
@@ -51,6 +51,24 @@ draw_type TEXT CHECK(draw_type IN ('day', 'spread')),
 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ```
 
+### payments (Telegram Stars transactions log)
+```sql
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+user_id INTEGER NOT NULL,
+package_id TEXT NOT NULL,
+stars_amount INTEGER NOT NULL,
+readings_granted INTEGER NOT NULL,
+telegram_payment_charge_id TEXT,
+created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+```
+
+## Payments (Telegram Stars)
+- Currency: XTR (Telegram Stars). No provider_token needed.
+- Three packages: test (1⭐→1), standard (50⭐→10), premium (100⭐→25)
+- Payment adds `readings_granted` to `users.ai_requests_remaining`
+- All payments logged in `payments` table with Telegram charge ID
+- Payment button hidden from admin (unlimited AI access)
+
 ## Bot commands
 
 ### P0 (must have)
@@ -69,9 +87,8 @@ created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 | Spam block | >10 requests/min = 5 min temp ban (in-memory dict) |
 
 ## Explicitly excluded from MVP
-- Payments / subscriptions
+- Subscriptions (monthly recurring via subscription_period)
 - Spread history
-- GPT / AI integration
 - Admin panel UI
 - Registration / profiles
 - Voice messages

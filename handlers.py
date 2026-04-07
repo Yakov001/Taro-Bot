@@ -6,13 +6,15 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     FSInputFile,
+    LabeledPrice,
     Message,
+    PreCheckoutQuery,
     ReplyKeyboardMarkup,
     KeyboardButton,
 )
 
 import db
-from config import ADMIN_USER_ID, IMAGES_DIR
+from config import ADMIN_USER_ID, IMAGES_DIR, PAYMENT_PACKAGES
 from yandex_gpt import interpret_spread, interpret_theme
 
 router = Router()
@@ -34,6 +36,17 @@ BTN_THEME = "🎯 Расклад по теме"
 BTN_LOVE = "❤️ Любовь"
 BTN_HEALTH = "🍀 Здоровье"
 BTN_CAREER = "💼 Карьера"
+
+BTN_PAY_TEST = "🧪 Тест (1⭐ → 1 толкование)"
+BTN_PAY_10 = "📦 10 толкований (50⭐)"
+BTN_PAY_25 = "💎 25 толкований (100⭐)"
+
+# Map button text → package_id from config
+_BTN_TO_PACKAGE = {
+    BTN_PAY_TEST: "test_1",
+    BTN_PAY_10: "pack_10",
+    BTN_PAY_25: "pack_25",
+}
 
 
 def _main_kb(is_admin: bool) -> ReplyKeyboardMarkup:
@@ -62,6 +75,16 @@ _personal_kb = ReplyKeyboardMarkup(
 _theme_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text=BTN_LOVE), KeyboardButton(text=BTN_HEALTH), KeyboardButton(text=BTN_CAREER)],
+        [KeyboardButton(text=BTN_BACK)],
+    ],
+    resize_keyboard=True,
+)
+
+_payment_kb = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text=BTN_PAY_TEST)],
+        [KeyboardButton(text=BTN_PAY_10)],
+        [KeyboardButton(text=BTN_PAY_25)],
         [KeyboardButton(text=BTN_BACK)],
     ],
     resize_keyboard=True,
@@ -111,8 +134,15 @@ async def menu_personal(message: Message, state: FSMContext) -> None:
 
 
 @router.message(F.text == BTN_PAYMENT)
-async def menu_payment(message: Message) -> None:
-    await message.answer("Оплата будет доступна в ближайшее время. Следите за обновлениями!")
+async def menu_payment(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    user = await db.get_or_create_user(message.from_user.id)
+    remaining = user["ai_requests_remaining"]
+    await message.answer(
+        f"Персональных толкований на балансе: {remaining}\n\n"
+        "Выбери пакет для пополнения:",
+        reply_markup=_payment_kb,
+    )
 
 
 @router.message(F.text == BTN_BACK)
@@ -276,6 +306,76 @@ async def handle_theme_choice(message: Message, bot: Bot, state: FSMContext) -> 
 async def handle_theme_back(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer("Выбери тип толкования:", reply_markup=_personal_kb)
+
+
+# ── Payments (Telegram Stars) ─────────────────────────
+
+@router.message(F.text.in_({BTN_PAY_TEST, BTN_PAY_10, BTN_PAY_25}))
+async def send_payment_invoice(message: Message, bot: Bot) -> None:
+    """User tapped a package button → send Stars invoice."""
+    package_id = _BTN_TO_PACKAGE[message.text]
+    pkg = PAYMENT_PACKAGES[package_id]
+
+    await bot.send_invoice(
+        chat_id=message.chat.id,
+        title=pkg["title"],
+        description=pkg["description"],
+        payload=f"{package_id}:{message.from_user.id}",  # package_id:user_id
+        currency="XTR",  # Telegram Stars — provider_token не нужен
+        prices=[LabeledPrice(label=pkg["title"], amount=pkg["stars"])],
+    )
+
+
+@router.pre_checkout_query()
+async def on_pre_checkout(pre_checkout_query: PreCheckoutQuery) -> None:
+    """Telegram asks if we're ready to accept payment. Must respond <10 sec."""
+    payload = pre_checkout_query.invoice_payload
+    parts = payload.split(":")
+
+    # Validate payload format and package existence
+    if len(parts) == 2 and parts[0] in PAYMENT_PACKAGES:
+        await pre_checkout_query.answer(ok=True)
+    else:
+        await pre_checkout_query.answer(ok=False, error_message="Неизвестный пакет. Попробуйте снова.")
+
+
+@router.message(F.successful_payment)
+async def on_successful_payment(message: Message) -> None:
+    """Payment confirmed by Telegram. Credit AI readings to user."""
+    payment = message.successful_payment
+    payload = payment.invoice_payload
+    parts = payload.split(":")
+
+    if len(parts) != 2 or parts[0] not in PAYMENT_PACKAGES:
+        logger.error("Unknown payment payload: %s", payload)
+        await message.answer("Оплата получена, но произошла ошибка. Напишите администратору.")
+        return
+
+    package_id = parts[0]
+    pkg = PAYMENT_PACKAGES[package_id]
+    user_id = message.from_user.id
+    readings = pkg["readings"]
+
+    # Ensure user exists
+    await db.get_or_create_user(user_id)
+
+    # Credit readings to balance
+    new_balance = await db.add_ai_requests(user_id, readings)
+
+    # Log payment for accounting
+    charge_id = payment.telegram_payment_charge_id or ""
+    await db.log_payment(user_id, package_id, pkg["stars"], readings, charge_id)
+
+    logger.info(
+        "Payment OK: user=%s package=%s stars=%s readings=+%s balance=%s charge=%s",
+        user_id, package_id, pkg["stars"], readings, new_balance, charge_id,
+    )
+
+    await message.answer(
+        f"Оплата прошла! ✅\n\n"
+        f"Начислено толкований: +{readings}\n"
+        f"Баланс персональных толкований: {new_balance}"
+    )
 
 
 # ── /reset (admin) ─────────────────────────────────────
