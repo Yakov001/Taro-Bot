@@ -8,6 +8,10 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
 
+YANDEX_API_KEY = os.getenv("YANDEX_API_KEY", "")
+YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID", "")
+YANDEX_MODEL = os.getenv("YANDEX_MODEL", "yandexgpt")
+
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = str(BASE_DIR / "bot.db")
 IMAGES_DIR = BASE_DIR / "images"
