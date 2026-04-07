@@ -20,20 +20,20 @@ logger = logging.getLogger(__name__)
 
 # ── Keyboards ──────────────────────────────────────────
 
-BTN_SPREADS = "Расклады"
-BTN_PERSONAL = "Персональные толкования"
-BTN_PAYMENT = "Оплата"
-BTN_BACK = "Назад"
+BTN_SPREADS = "🃏 Расклады"
+BTN_PERSONAL = "✨ Персональные толкования"
+BTN_PAYMENT = "💳 Оплата"
+BTN_BACK = "◀️ Назад"
 
-BTN_DAY = "Карта дня"
-BTN_SPREAD3 = "Расклад 3 карты"
+BTN_DAY = "🌅 Карта дня"
+BTN_SPREAD3 = "🔮 Расклад 3 карты"
 
-BTN_QUESTION = "Расклад с вопросом"
-BTN_THEME = "Расклад по теме"
+BTN_QUESTION = "❓ Расклад с вопросом"
+BTN_THEME = "🎯 Расклад по теме"
 
-BTN_LOVE = "Любовь"
-BTN_HEALTH = "Здоровье"
-BTN_CAREER = "Карьера"
+BTN_LOVE = "❤️ Любовь"
+BTN_HEALTH = "🍀 Здоровье"
+BTN_CAREER = "💼 Карьера"
 
 
 def _main_kb(is_admin: bool) -> ReplyKeyboardMarkup:
