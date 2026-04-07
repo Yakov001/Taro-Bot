@@ -23,7 +23,6 @@ async def main() -> None:
 
     antiflood = AntifloodMiddleware()
     dp.message.middleware(antiflood)
-    dp.callback_query.middleware(antiflood)
 
     dp.include_router(router)
 
