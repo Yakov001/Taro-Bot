@@ -1,6 +1,6 @@
 import aiosqlite
 
-from config import DB_PATH, DEFAULT_SPREADS
+from config import DB_PATH, DEFAULT_SPREADS, DEFAULT_AI_REQUESTS
 from cards_data import TAROT_CARDS
 
 
@@ -10,9 +10,18 @@ async def init_db() -> None:
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 spreads_remaining INTEGER DEFAULT 5,
+                ai_requests_remaining INTEGER DEFAULT 3,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Migration: add ai_requests_remaining if missing
+        try:
+            await db.execute(
+                "ALTER TABLE users ADD COLUMN ai_requests_remaining INTEGER DEFAULT 3"
+            )
+            await db.commit()
+        except Exception:
+            pass  # column already exists
         await db.execute("""
             CREATE TABLE IF NOT EXISTS tarot_cards (
                 id INTEGER PRIMARY KEY,
@@ -94,11 +103,35 @@ async def decrement_spreads(user_id: int) -> int:
         return remaining
 
 
+async def get_ai_remaining(user_id: int) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT ai_requests_remaining FROM users WHERE user_id = ?", (user_id,)
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
+
+async def decrement_ai_requests(user_id: int) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET ai_requests_remaining = ai_requests_remaining - 1 "
+            "WHERE user_id = ? AND ai_requests_remaining > 0",
+            (user_id,),
+        )
+        await db.commit()
+        cursor = await db.execute(
+            "SELECT ai_requests_remaining FROM users WHERE user_id = ?", (user_id,)
+        )
+        (remaining,) = await cursor.fetchone()
+        return remaining
+
+
 async def reset_user_spreads(user_id: int) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "UPDATE users SET spreads_remaining = ? WHERE user_id = ?",
-            (DEFAULT_SPREADS, user_id),
+            "UPDATE users SET spreads_remaining = ?, ai_requests_remaining = ? WHERE user_id = ?",
+            (DEFAULT_SPREADS, DEFAULT_AI_REQUESTS, user_id),
         )
         await db.commit()
         return cursor.rowcount > 0

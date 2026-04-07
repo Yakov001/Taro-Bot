@@ -35,12 +35,13 @@ class SpreadQuestion(StatesGroup):
 
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
-    await db.get_or_create_user(message.from_user.id)
+    user = await db.get_or_create_user(message.from_user.id)
     text = (
         "Привет! Я простой таролог-бот.\n"
         "Карта дня — /day\n"
         "Расклад на прошлое-настоящее-будущее — /spread\n"
-        "Расклад с вопросом (ИИ-толкование) — /question"
+        "Расклад с вопросом (ИИ-толкование) — /question\n\n"
+        f"Осталось персональных толкований: {user['ai_requests_remaining']}"
     )
     await message.answer(text, reply_markup=_main_keyboard)
 
@@ -91,7 +92,22 @@ async def _send_spread(message: Message, bot: Bot, user_id: int) -> None:
 @router.message(Command("question"))
 @router.message(F.text == "Расклад с вопросом")
 async def cmd_question_spread(message: Message, state: FSMContext) -> None:
-    await db.get_or_create_user(message.from_user.id)
+    user_id = message.from_user.id
+    await db.get_or_create_user(user_id)
+
+    is_admin = user_id == ADMIN_USER_ID
+
+    # Check AI limit (admin bypasses)
+    if not is_admin:
+        remaining = await db.get_ai_remaining(user_id)
+        if remaining <= 0:
+            await message.answer(
+                "У тебя закончились персональные толкования.\n"
+                "Обычный расклад (/spread) доступен всегда. Полная версия бота — скоро!"
+            )
+            return
+        await message.answer(f"У тебя осталось персональных толкований: {remaining}")
+
     await state.set_state(SpreadQuestion.waiting_for_question)
     await message.answer("Задай свой вопрос, и я сделаю расклад с толкованием:")
 
@@ -107,6 +123,8 @@ async def handle_question(message: Message, bot: Bot, state: FSMContext) -> None
     user_id = message.from_user.id
     await db.get_or_create_user(user_id)
 
+    is_admin = user_id == ADMIN_USER_ID
+
     cards = await db.get_random_cards(3)
 
     labels = ["Прошлое", "Настоящее", "Будущее"]
@@ -120,7 +138,13 @@ async def handle_question(message: Message, bot: Bot, state: FSMContext) -> None
     await message.answer("Толкую карты...")
     ai_text = await interpret_spread(question, cards)
     if ai_text:
-        await message.answer(f"Толкование расклада:\n\n{ai_text}")
+        # Decrement and show remaining (admin skips)
+        if not is_admin:
+            new_remaining = await db.decrement_ai_requests(user_id)
+            await message.answer(f"Толкование расклада:\n\n{ai_text}\n\n"
+                                 f"Осталось персональных толкований: {new_remaining}")
+        else:
+            await message.answer(f"Толкование расклада:\n\n{ai_text}")
     else:
         await message.answer("Не удалось получить толкование. Попробуйте позже.")
 
@@ -146,7 +170,7 @@ async def cmd_reset(message: Message) -> None:
 
     found = await db.reset_user_spreads(target_id)
     if found:
-        await message.answer(f"Счётчик раскладов для пользователя {target_id} сброшен.")
+        await message.answer(f"Счётчик раскладов и персональных толкований для пользователя {target_id} сброшен.")
     else:
         await message.answer(f"Пользователь {target_id} не найден.")
 
