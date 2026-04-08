@@ -184,14 +184,7 @@ async def cmd_spread(message: Message, bot: Bot) -> None:
 async def _send_spread(message: Message, bot: Bot, user_id: int) -> None:
     await db.get_or_create_user(user_id)
     cards = await db.get_random_cards(3)
-
-    labels = ["⏳ Прошлое", "🔮 Настоящее", "⭐ Будущее"]
-    lines = []
-    for label, card in zip(labels, cards):
-        await db.log_draw(user_id, card["id"], "spread")
-        lines.append(f"{label}: {card['name']} — {card['meaning_short']}")
-
-    await message.answer("\n\n".join(lines))
+    await _send_spread_cards(message, cards, user_id)
 
 
 # ── Расклад с вопросом (AI) ────────────────────────────
@@ -229,14 +222,7 @@ async def handle_question(message: Message, bot: Bot, state: FSMContext) -> None
     await db.get_or_create_user(user_id)
 
     cards = await db.get_random_cards(3)
-
-    labels = ["⏳ Прошлое", "🔮 Настоящее", "⭐ Будущее"]
-    lines = []
-    for label, card in zip(labels, cards):
-        await db.log_draw(user_id, card["id"], "spread")
-        lines.append(f"{label}: {card['name']} — {card['meaning_short']}")
-
-    await message.answer("\n\n".join(lines))
+    await _send_spread_cards(message, cards, user_id)
 
     await message.answer("🔮 Толкую карты...")
     ai_text = await interpret_spread(question, cards)
@@ -284,13 +270,8 @@ async def handle_theme_choice(message: Message, bot: Bot, state: FSMContext) -> 
 
     cards = await db.get_random_cards(3)
 
-    labels = ["⏳ Прошлое", "🔮 Настоящее", "⭐ Будущее"]
-    lines = [f"🎯 Тема: {theme}\n"]
-    for label, card in zip(labels, cards):
-        await db.log_draw(user_id, card["id"], "spread")
-        lines.append(f"{label}: {card['name']} — {card['meaning_short']}")
-
-    await message.answer("\n\n".join(lines), reply_markup=_main_kb(_is_admin(user_id)))
+    await message.answer(f"🎯 Тема: {theme}", reply_markup=_main_kb(_is_admin(user_id)))
+    await _send_spread_cards(message, cards, user_id)
 
     await message.answer("🔮 Толкую карты...")
     ai_text = await interpret_theme(theme, cards)
@@ -454,3 +435,13 @@ async def _send_card_image(message: Message, card: dict, caption: str) -> bool:
             logger.warning("Failed to send image for card %s", card["id"], exc_info=True)
 
     return False
+
+
+async def _send_spread_cards(message: Message, cards: list[dict], user_id: int) -> None:
+    labels = ["⏳ Прошлое", "🔮 Настоящее", "⭐ Будущее"]
+    for label, card in zip(labels, cards):
+        await db.log_draw(user_id, card["id"], "spread")
+        caption = f"{label}: {card['name']}\n\n{card['meaning_short']}"
+        sent = await _send_card_image(message, card, caption)
+        if not sent:
+            await message.answer(caption)
