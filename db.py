@@ -58,12 +58,17 @@ async def init_db() -> None:
 async def _seed_cards(db: aiosqlite.Connection) -> None:
     cursor = await db.execute("SELECT COUNT(*) FROM tarot_cards")
     (count,) = await cursor.fetchone()
-    if count > 0:
-        return
-    await db.executemany(
-        "INSERT OR IGNORE INTO tarot_cards (id, name, image_url, meaning_short) VALUES (?, ?, ?, ?)",
-        [(c["id"], c["name"], c["image_filename"], c["meaning_short"]) for c in TAROT_CARDS],
-    )
+    if count == 0:
+        await db.executemany(
+            "INSERT INTO tarot_cards (id, name, image_url, meaning_short) VALUES (?, ?, ?, ?)",
+            [(c["id"], c["name"], c["image_filename"], c["meaning_short"]) for c in TAROT_CARDS],
+        )
+    else:
+        # Update image filenames and names from cards_data
+        await db.executemany(
+            "UPDATE tarot_cards SET image_url = ?, name = ?, meaning_short = ? WHERE id = ?",
+            [(c["image_filename"], c["name"], c["meaning_short"], c["id"]) for c in TAROT_CARDS],
+        )
     await db.commit()
 
 
