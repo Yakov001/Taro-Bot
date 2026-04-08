@@ -13,6 +13,7 @@ from aiogram.types import (
     KeyboardButton,
 )
 
+import analytics
 import db
 from config import ADMIN_USER_ID, IMAGES_DIR, PAYMENT_PACKAGES
 from yandex_gpt import interpret_spread, interpret_theme
@@ -113,6 +114,7 @@ def _is_admin(user_id: int) -> bool:
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     user = await db.get_or_create_user(message.from_user.id)
+    await analytics.track(message.from_user.id, "bot_start")
     text = (
         "🌟 Привет! Я твой персональный таролог-бот.\n\n"
         "🃏 Расклады — карта дня и расклад 3 карты\n"
@@ -127,12 +129,14 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 @router.message(F.text == BTN_SPREADS)
 async def menu_spreads(message: Message, state: FSMContext) -> None:
     await state.clear()
+    await analytics.track(message.from_user.id, "menu_spreads")
     await message.answer("🃏 Выбери тип расклада:", reply_markup=_spreads_kb)
 
 
 @router.message(F.text == BTN_PERSONAL)
 async def menu_personal(message: Message, state: FSMContext) -> None:
     await state.clear()
+    await analytics.track(message.from_user.id, "menu_personal")
     await message.answer("✨ Выбери тип толкования:", reply_markup=_personal_kb)
 
 
@@ -141,6 +145,7 @@ async def menu_payment(message: Message, state: FSMContext) -> None:
     await state.clear()
     user = await db.get_or_create_user(message.from_user.id)
     remaining = user["ai_requests_remaining"]
+    await analytics.track(message.from_user.id, "menu_payment", balance=remaining)
     await message.answer(
         f"💫 Персональных толкований на балансе: {remaining}\n\n"
         "⬇️ Выбери пакет для пополнения:",
@@ -151,6 +156,7 @@ async def menu_payment(message: Message, state: FSMContext) -> None:
 @router.message(F.text == BTN_BACK)
 async def menu_back(message: Message, state: FSMContext) -> None:
     await state.clear()
+    await analytics.track(message.from_user.id, "back")
     await message.answer("🏠 Главное меню:", reply_markup=_main_kb(_is_admin(message.from_user.id)))
 
 
@@ -166,6 +172,7 @@ async def _send_day_card(message: Message, bot: Bot, user_id: int) -> None:
     await db.get_or_create_user(user_id)
     card = await db.get_random_card()
     await db.log_draw(user_id, card["id"], "day")
+    await analytics.track(user_id, "card_day", card_name=card["name"])
 
     caption = f"🃏 Ваша карта дня — {card['name']}\n\n{card['meaning_short']}"
     sent = await _send_card_image(message, card, caption)
@@ -184,6 +191,7 @@ async def cmd_spread(message: Message, bot: Bot) -> None:
 async def _send_spread(message: Message, bot: Bot, user_id: int) -> None:
     await db.get_or_create_user(user_id)
     cards = await db.get_random_cards(3)
+    await analytics.track(user_id, "spread_3", cards=[c["name"] for c in cards])
     await _send_spread_cards(message, cards, user_id)
 
 
@@ -198,6 +206,7 @@ async def cmd_question_spread(message: Message, state: FSMContext) -> None:
     if not _is_admin(user_id):
         remaining = await db.get_ai_remaining(user_id)
         if remaining <= 0:
+            await analytics.track(user_id, "ai_limit_reached", source="question")
             await message.answer(
                 "❌ У тебя закончились персональные толкования.\n"
                 "🃏 Обычный расклад доступен всегда!\n"
@@ -206,6 +215,7 @@ async def cmd_question_spread(message: Message, state: FSMContext) -> None:
             return
         await message.answer(f"🔮 Осталось персональных толкований: {remaining}")
 
+    await analytics.track(user_id, "question_start")
     await state.set_state(BotStates.waiting_for_question)
     await message.answer("💬 Задай свой вопрос, и я сделаю расклад с толкованием:")
 
@@ -229,13 +239,16 @@ async def handle_question(message: Message, bot: Bot, state: FSMContext) -> None
     if ai_text:
         if not _is_admin(user_id):
             new_remaining = await db.decrement_ai_requests(user_id)
+            await analytics.track(user_id, "question_complete", ai_success=True, balance_after=new_remaining)
             await message.answer(
                 f"🌙 Толкование расклада:\n\n{ai_text}\n\n"
                 f"🔮 Осталось персональных толкований: {new_remaining}"
             )
         else:
+            await analytics.track(user_id, "question_complete", ai_success=True)
             await message.answer(f"🌙 Толкование расклада:\n\n{ai_text}")
     else:
+        await analytics.track(user_id, "question_complete", ai_success=False)
         await message.answer("⚠️ Не удалось получить толкование. Попробуйте позже.")
 
 
@@ -249,6 +262,7 @@ async def cmd_theme_spread(message: Message, state: FSMContext) -> None:
     if not _is_admin(user_id):
         remaining = await db.get_ai_remaining(user_id)
         if remaining <= 0:
+            await analytics.track(user_id, "ai_limit_reached", source="theme")
             await message.answer(
                 "❌ У тебя закончились персональные толкования.\n"
                 "🃏 Обычный расклад доступен всегда!\n"
@@ -257,6 +271,7 @@ async def cmd_theme_spread(message: Message, state: FSMContext) -> None:
             return
         await message.answer(f"🔮 Осталось персональных толкований: {remaining}")
 
+    await analytics.track(user_id, "theme_start")
     await state.set_state(BotStates.waiting_for_theme_choice)
     await message.answer("🎯 Выбери тему расклада:", reply_markup=_theme_kb)
 
@@ -270,6 +285,7 @@ async def handle_theme_choice(message: Message, bot: Bot, state: FSMContext) -> 
 
     cards = await db.get_random_cards(3)
 
+    await analytics.track(user_id, "theme_select", theme=theme)
     await message.answer(f"🎯 Тема: {theme}", reply_markup=_main_kb(_is_admin(user_id)))
     await _send_spread_cards(message, cards, user_id)
 
@@ -278,19 +294,23 @@ async def handle_theme_choice(message: Message, bot: Bot, state: FSMContext) -> 
     if ai_text:
         if not _is_admin(user_id):
             new_remaining = await db.decrement_ai_requests(user_id)
+            await analytics.track(user_id, "theme_complete", ai_success=True, theme=theme, balance_after=new_remaining)
             await message.answer(
                 f"🌙 Толкование расклада:\n\n{ai_text}\n\n"
                 f"🔮 Осталось персональных толкований: {new_remaining}"
             )
         else:
+            await analytics.track(user_id, "theme_complete", ai_success=True, theme=theme)
             await message.answer(f"🌙 Толкование расклада:\n\n{ai_text}")
     else:
+        await analytics.track(user_id, "theme_complete", ai_success=False, theme=theme)
         await message.answer("⚠️ Не удалось получить толкование. Попробуйте позже.")
 
 
 @router.message(BotStates.waiting_for_theme_choice, F.text == BTN_BACK)
 async def handle_theme_back(message: Message, state: FSMContext) -> None:
     await state.clear()
+    await analytics.track(message.from_user.id, "back", from_screen="theme_choice")
     await message.answer("✨ Выбери тип толкования:", reply_markup=_personal_kb)
 
 
@@ -302,6 +322,12 @@ async def send_payment_invoice(message: Message, bot: Bot) -> None:
     package_id = _BTN_TO_PACKAGE[message.text]
     pkg = PAYMENT_PACKAGES[package_id]
 
+    await analytics.track(
+        message.from_user.id, "payment_invoice_sent",
+        package_id=package_id,
+        stars=pkg["stars"],
+        readings=pkg["readings"],
+    )
     await bot.send_invoice(
         chat_id=message.chat.id,
         title=pkg["title"],
@@ -351,6 +377,13 @@ async def on_successful_payment(message: Message) -> None:
     # Log payment for accounting
     charge_id = payment.telegram_payment_charge_id or ""
     await db.log_payment(user_id, package_id, pkg["stars"], readings, charge_id)
+    await analytics.track(
+        user_id, "payment_success",
+        package_id=package_id,
+        stars=pkg["stars"],
+        readings=readings,
+        balance_after=new_balance,
+    )
 
     logger.info(
         "Payment OK: user=%s package=%s stars=%s readings=+%s balance=%s charge=%s",
