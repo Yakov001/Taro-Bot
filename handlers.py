@@ -50,7 +50,10 @@ _BTN_TO_PACKAGE = {
 
 
 def _main_kb(is_admin: bool) -> ReplyKeyboardMarkup:
-    rows = [[KeyboardButton(text=BTN_SPREADS), KeyboardButton(text=BTN_PERSONAL)]]
+    rows = [
+        [KeyboardButton(text=BTN_SPREADS)],
+        [KeyboardButton(text=BTN_PERSONAL)],
+    ]
     if not is_admin:
         rows.append([KeyboardButton(text=BTN_PAYMENT)])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
@@ -111,10 +114,10 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     user = await db.get_or_create_user(message.from_user.id)
     text = (
-        "Привет! Я простой таролог-бот.\n\n"
-        "Расклады — карта дня и расклад 3 карты\n"
-        "Персональные толкования — ИИ-расклад по вопросу или теме\n\n"
-        f"Осталось персональных толкований: {user['ai_requests_remaining']}"
+        "🌟 Привет! Я твой персональный таролог-бот.\n\n"
+        "🃏 Расклады — карта дня и расклад 3 карты\n"
+        "✨ Персональные толкования — ИИ-расклад по вопросу или теме\n\n"
+        f"🔮 Осталось персональных толкований: {user['ai_requests_remaining']}"
     )
     await message.answer(text, reply_markup=_main_kb(_is_admin(message.from_user.id)))
 
@@ -124,13 +127,13 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 @router.message(F.text == BTN_SPREADS)
 async def menu_spreads(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await message.answer("Выбери тип расклада:", reply_markup=_spreads_kb)
+    await message.answer("🃏 Выбери тип расклада:", reply_markup=_spreads_kb)
 
 
 @router.message(F.text == BTN_PERSONAL)
 async def menu_personal(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await message.answer("Выбери тип толкования:", reply_markup=_personal_kb)
+    await message.answer("✨ Выбери тип толкования:", reply_markup=_personal_kb)
 
 
 @router.message(F.text == BTN_PAYMENT)
@@ -139,8 +142,8 @@ async def menu_payment(message: Message, state: FSMContext) -> None:
     user = await db.get_or_create_user(message.from_user.id)
     remaining = user["ai_requests_remaining"]
     await message.answer(
-        f"Персональных толкований на балансе: {remaining}\n\n"
-        "Выбери пакет для пополнения:",
+        f"💫 Персональных толкований на балансе: {remaining}\n\n"
+        "⬇️ Выбери пакет для пополнения:",
         reply_markup=_payment_kb,
     )
 
@@ -148,7 +151,7 @@ async def menu_payment(message: Message, state: FSMContext) -> None:
 @router.message(F.text == BTN_BACK)
 async def menu_back(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await message.answer("Главное меню:", reply_markup=_main_kb(_is_admin(message.from_user.id)))
+    await message.answer("🏠 Главное меню:", reply_markup=_main_kb(_is_admin(message.from_user.id)))
 
 
 # ── /day ───────────────────────────────────────────────
@@ -164,7 +167,7 @@ async def _send_day_card(message: Message, bot: Bot, user_id: int) -> None:
     card = await db.get_random_card()
     await db.log_draw(user_id, card["id"], "day")
 
-    caption = f"Ваша карта дня — {card['name']}\n\n{card['meaning_short']}"
+    caption = f"🃏 Ваша карта дня — {card['name']}\n\n{card['meaning_short']}"
     sent = await _send_card_image(message, card, caption)
     if not sent:
         await message.answer(caption)
@@ -182,7 +185,7 @@ async def _send_spread(message: Message, bot: Bot, user_id: int) -> None:
     await db.get_or_create_user(user_id)
     cards = await db.get_random_cards(3)
 
-    labels = ["Прошлое", "Настоящее", "Будущее"]
+    labels = ["⏳ Прошлое", "🔮 Настоящее", "⭐ Будущее"]
     lines = []
     for label, card in zip(labels, cards):
         await db.log_draw(user_id, card["id"], "spread")
@@ -203,14 +206,15 @@ async def cmd_question_spread(message: Message, state: FSMContext) -> None:
         remaining = await db.get_ai_remaining(user_id)
         if remaining <= 0:
             await message.answer(
-                "У тебя закончились персональные толкования.\n"
-                "Обычный расклад доступен всегда. Полная версия бота — скоро!"
+                "❌ У тебя закончились персональные толкования.\n"
+                "🃏 Обычный расклад доступен всегда!\n"
+                "💳 Пополни баланс в разделе «Оплата»"
             )
             return
-        await message.answer(f"Осталось персональных толкований: {remaining}")
+        await message.answer(f"🔮 Осталось персональных толкований: {remaining}")
 
     await state.set_state(BotStates.waiting_for_question)
-    await message.answer("Задай свой вопрос, и я сделаю расклад с толкованием:")
+    await message.answer("💬 Задай свой вопрос, и я сделаю расклад с толкованием:")
 
 
 @router.message(BotStates.waiting_for_question)
@@ -218,7 +222,7 @@ async def handle_question(message: Message, bot: Bot, state: FSMContext) -> None
     await state.clear()
     question = message.text
     if not question:
-        await message.answer("Пожалуйста, напиши вопрос текстом.")
+        await message.answer("✏️ Пожалуйста, напиши вопрос текстом.")
         return
 
     user_id = message.from_user.id
@@ -226,7 +230,7 @@ async def handle_question(message: Message, bot: Bot, state: FSMContext) -> None
 
     cards = await db.get_random_cards(3)
 
-    labels = ["Прошлое", "Настоящее", "Будущее"]
+    labels = ["⏳ Прошлое", "🔮 Настоящее", "⭐ Будущее"]
     lines = []
     for label, card in zip(labels, cards):
         await db.log_draw(user_id, card["id"], "spread")
@@ -234,19 +238,19 @@ async def handle_question(message: Message, bot: Bot, state: FSMContext) -> None
 
     await message.answer("\n\n".join(lines))
 
-    await message.answer("Толкую карты...")
+    await message.answer("🔮 Толкую карты...")
     ai_text = await interpret_spread(question, cards)
     if ai_text:
         if not _is_admin(user_id):
             new_remaining = await db.decrement_ai_requests(user_id)
             await message.answer(
-                f"Толкование расклада:\n\n{ai_text}\n\n"
-                f"Осталось персональных толкований: {new_remaining}"
+                f"🌙 Толкование расклада:\n\n{ai_text}\n\n"
+                f"🔮 Осталось персональных толкований: {new_remaining}"
             )
         else:
-            await message.answer(f"Толкование расклада:\n\n{ai_text}")
+            await message.answer(f"🌙 Толкование расклада:\n\n{ai_text}")
     else:
-        await message.answer("Не удалось получить толкование. Попробуйте позже.")
+        await message.answer("⚠️ Не удалось получить толкование. Попробуйте позже.")
 
 
 # ── Расклад по теме (AI) ──────────────────────────────
@@ -260,14 +264,15 @@ async def cmd_theme_spread(message: Message, state: FSMContext) -> None:
         remaining = await db.get_ai_remaining(user_id)
         if remaining <= 0:
             await message.answer(
-                "У тебя закончились персональные толкования.\n"
-                "Обычный расклад доступен всегда. Полная версия бота — скоро!"
+                "❌ У тебя закончились персональные толкования.\n"
+                "🃏 Обычный расклад доступен всегда!\n"
+                "💳 Пополни баланс в разделе «Оплата»"
             )
             return
-        await message.answer(f"Осталось персональных толкований: {remaining}")
+        await message.answer(f"🔮 Осталось персональных толкований: {remaining}")
 
     await state.set_state(BotStates.waiting_for_theme_choice)
-    await message.answer("Выбери тему расклада:", reply_markup=_theme_kb)
+    await message.answer("🎯 Выбери тему расклада:", reply_markup=_theme_kb)
 
 
 @router.message(BotStates.waiting_for_theme_choice, F.text.in_({BTN_LOVE, BTN_HEALTH, BTN_CAREER}))
@@ -279,33 +284,33 @@ async def handle_theme_choice(message: Message, bot: Bot, state: FSMContext) -> 
 
     cards = await db.get_random_cards(3)
 
-    labels = ["Прошлое", "Настоящее", "Будущее"]
-    lines = [f"Тема: {theme}\n"]
+    labels = ["⏳ Прошлое", "🔮 Настоящее", "⭐ Будущее"]
+    lines = [f"🎯 Тема: {theme}\n"]
     for label, card in zip(labels, cards):
         await db.log_draw(user_id, card["id"], "spread")
         lines.append(f"{label}: {card['name']} — {card['meaning_short']}")
 
     await message.answer("\n\n".join(lines), reply_markup=_main_kb(_is_admin(user_id)))
 
-    await message.answer("Толкую карты...")
+    await message.answer("🔮 Толкую карты...")
     ai_text = await interpret_theme(theme, cards)
     if ai_text:
         if not _is_admin(user_id):
             new_remaining = await db.decrement_ai_requests(user_id)
             await message.answer(
-                f"Толкование расклада:\n\n{ai_text}\n\n"
-                f"Осталось персональных толкований: {new_remaining}"
+                f"🌙 Толкование расклада:\n\n{ai_text}\n\n"
+                f"🔮 Осталось персональных толкований: {new_remaining}"
             )
         else:
-            await message.answer(f"Толкование расклада:\n\n{ai_text}")
+            await message.answer(f"🌙 Толкование расклада:\n\n{ai_text}")
     else:
-        await message.answer("Не удалось получить толкование. Попробуйте позже.")
+        await message.answer("⚠️ Не удалось получить толкование. Попробуйте позже.")
 
 
 @router.message(BotStates.waiting_for_theme_choice, F.text == BTN_BACK)
 async def handle_theme_back(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await message.answer("Выбери тип толкования:", reply_markup=_personal_kb)
+    await message.answer("✨ Выбери тип толкования:", reply_markup=_personal_kb)
 
 
 # ── Payments (Telegram Stars) ─────────────────────────
@@ -372,9 +377,9 @@ async def on_successful_payment(message: Message) -> None:
     )
 
     await message.answer(
-        f"Оплата прошла! ✅\n\n"
-        f"Начислено толкований: +{readings}\n"
-        f"Баланс персональных толкований: {new_balance}"
+        f"✅ Оплата прошла!\n\n"
+        f"🎁 Начислено толкований: +{readings}\n"
+        f"🔮 Баланс персональных толкований: {new_balance}"
     )
 
 
