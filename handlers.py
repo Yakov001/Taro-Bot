@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import random  # <-- Добавлен импорт
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandStart
@@ -175,7 +176,8 @@ async def menu_back(message: Message, state: FSMContext) -> None:
     await state.clear()
     user = await db.get_or_create_user(message.from_user.id)
     await analytics.track(message.from_user.id, "back")
-    await message.answer("🏠 Главное меню:", reply_markup=_main_kb(_is_admin(message.from_user.id), user['ai_requests_remaining']))
+    await message.answer("🏠 Главное меню:",
+                         reply_markup=_main_kb(_is_admin(message.from_user.id), user['ai_requests_remaining']))
 
 
 # ── /day ───────────────────────────────────────────────
@@ -492,11 +494,75 @@ async def _send_card_image(message: Message, card: dict, caption: str) -> bool:
     return False
 
 
+# ── Новая анимация для вытягивания карт ──────────────────
+
+async def _animate_drawing(message: Message, card_number: int) -> Message:
+    """
+    Отправляет сообщение с анимацией вытягивания карты и возвращает объект сообщения.
+    card_number: 1, 2 или 3.
+    """
+    # Словарь с фразами для каждого этапа вытягивания карты
+    draw_phrases = {
+        1: [
+            "🃏 Тасуем колоду...",
+            "✨ Концентрируемся на энергии...",
+            "🌙 Вытягиваю первую карту...",
+            "🔮 Первая карта готова:",
+        ],
+        2: [
+            "🌀 Сдвигаем часть колоды...",
+            "🌟 Смотрим вторую карту...",
+            "💫 Вторая карта готова:",
+        ],
+        3: [
+            "🌌 Осталась последняя карта...",
+            "⭐ Завершаем расклад...",
+            "🎴 Третья карта готова:",
+        ],
+    }
+
+    phrases = draw_phrases.get(card_number, ["🎲 Вытягиваю карту..."])
+
+    # Отправляем первое сообщение из списка фраз
+    msg = await message.answer(phrases[0])
+
+    # Проходим по остальным фразам с паузой
+    for phrase in phrases[1:]:
+        await asyncio.sleep(1.5)  # Пауза между сменой фраз
+        await msg.edit_text(phrase)
+
+    await asyncio.sleep(0.8)  # Небольшая пауза перед показом карты
+    return msg
+
+
 async def _send_spread_cards(message: Message, cards: list[dict], user_id: int) -> None:
+    """
+    Отправляет 3 карты с паузой и анимацией вытягивания.
+    """
     labels = ["⏳ Прошлое", "🔮 Настоящее", "⭐ Будущее"]
-    for label, card in zip(labels, cards):
+
+    for idx, (label, card) in enumerate(zip(labels, cards), start=1):
         await db.log_draw(user_id, card["id"], "spread")
+
+        # Показываем анимацию вытягивания карты
+        anim_msg = await _animate_drawing(message, idx)
+
+        # Формируем подпись к карте
         caption = f"{label}: {card['name']}\n\n{card['meaning_short']}"
+
+        # Отправляем карту
         sent = await _send_card_image(message, card, caption)
+
+        # Если изображение не отправилось, отправляем текст
         if not sent:
             await message.answer(caption)
+
+        # Удаляем анимационное сообщение, чтобы не засорять чат
+        try:
+            await anim_msg.delete()
+        except Exception:
+            pass  # Если сообщение уже удалено или недоступно — игнорируем
+
+        # Пауза между картами (кроме последней)
+        if idx < 3:
+            await asyncio.sleep(1.0)
