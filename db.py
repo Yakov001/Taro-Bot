@@ -25,6 +25,12 @@ async def init_db() -> None:
             await db.commit()
         except Exception:
             pass  # column already exists
+        # Migration: add username column if missing
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN username TEXT")
+            await db.commit()
+        except Exception:
+            pass
         await db.execute("""
             CREATE TABLE IF NOT EXISTS tarot_cards (
                 id INTEGER PRIMARY KEY,
@@ -110,14 +116,52 @@ async def _seed_cards(db: aiosqlite.Connection) -> None:
     await db.commit()
 
 
-async def get_or_create_user(user_id: int) -> dict:
+async def get_or_create_user(user_id: int, username: str | None = None) -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+        if username:
+            await db.execute(
+                "UPDATE users SET username = ? WHERE user_id = ?",
+                (username, user_id),
+            )
         await db.commit()
         cursor = await db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
         row = await cursor.fetchone()
         return dict(row)
+
+
+async def get_user_by_username(username: str) -> dict | None:
+    """Look up a user by Telegram @username (case-insensitive, leading @ stripped)."""
+    clean = username.lstrip("@").strip()
+    if not clean:
+        return None
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM users WHERE LOWER(username) = LOWER(?)", (clean,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def get_user_by_id(user_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def set_ai_requests(user_id: int, amount: int) -> bool:
+    """Set absolute AI-requests balance for user. Returns True if user exists."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "UPDATE users SET ai_requests_remaining = ? WHERE user_id = ?",
+            (amount, user_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
 
 
 async def get_random_card() -> dict:
