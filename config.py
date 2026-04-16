@@ -24,6 +24,9 @@ FLOOD_BAN_SECONDS = 300
 DEFAULT_SPREADS = 5
 DEFAULT_AI_REQUESTS = 3
 
+# ── Blind Pair Tarot ─────────────────────────────────
+PEEK_COST_STARS = 10  # Telegram Stars to reveal partner's card
+
 # ── Telegram Stars payment packages ──────────────────
 # payload_id → (stars_price, readings_granted, title, description)
 PAYMENT_PACKAGES = {

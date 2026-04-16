@@ -1,3 +1,6 @@
+import secrets
+import string
+
 import aiosqlite
 
 from config import DB_PATH, DEFAULT_SPREADS, DEFAULT_AI_REQUESTS
@@ -49,6 +52,18 @@ async def init_db() -> None:
                 readings_granted INTEGER NOT NULL,
                 telegram_payment_charge_id TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS blind_sessions (
+                code TEXT PRIMARY KEY,
+                user_a INTEGER NOT NULL,
+                user_b INTEGER,
+                card_a INTEGER,
+                card_b INTEGER,
+                status TEXT DEFAULT 'waiting',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP NOT NULL
             )
         """)
         await db.commit()
@@ -188,6 +203,66 @@ async def update_card_file_id(card_id: int, file_id: str) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE tarot_cards SET file_id = ? WHERE id = ?", (file_id, card_id))
         await db.commit()
+
+
+async def get_card_by_id(card_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM tarot_cards WHERE id = ?", (card_id,))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+# ── Blind Pair Tarot ─────────────────────────────────
+
+_BLIND_CODE_ALPHABET = string.ascii_uppercase + string.digits
+
+
+async def create_blind_session(user_a: int) -> str:
+    """Generate a unique 4-char code and persist the session. 24h TTL."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        for _ in range(20):
+            code = "".join(secrets.choice(_BLIND_CODE_ALPHABET) for _ in range(4))
+            try:
+                await db.execute(
+                    "INSERT INTO blind_sessions (code, user_a, expires_at) "
+                    "VALUES (?, ?, datetime('now', '+24 hours'))",
+                    (code, user_a),
+                )
+                await db.commit()
+                return code
+            except aiosqlite.IntegrityError:
+                continue
+        raise RuntimeError("Could not generate unique blind session code")
+
+
+async def get_blind_session(code: str) -> dict | None:
+    """Return session row if it exists and has not expired, else None."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM blind_sessions "
+            "WHERE code = ? AND expires_at > datetime('now')",
+            (code,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def update_blind_session_join(
+    code: str, user_b: int, card_a: int, card_b: int
+) -> bool:
+    """Atomically claim an unjoined session for user_b. Returns True on success."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "UPDATE blind_sessions "
+            "SET user_b = ?, card_a = ?, card_b = ?, status = 'completed' "
+            "WHERE code = ? AND user_b IS NULL "
+            "AND expires_at > datetime('now')",
+            (user_b, card_a, card_b, code),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
 
 
 async def get_stats() -> dict:
