@@ -61,11 +61,21 @@ async def init_db() -> None:
                 user_b INTEGER,
                 card_a INTEGER,
                 card_b INTEGER,
+                confirmed_a INTEGER DEFAULT 0,
+                confirmed_b INTEGER DEFAULT 0,
                 status TEXT DEFAULT 'waiting',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 expires_at TIMESTAMP NOT NULL
             )
         """)
+        for column in ("confirmed_a", "confirmed_b"):
+            try:
+                await db.execute(
+                    f"ALTER TABLE blind_sessions ADD COLUMN {column} INTEGER DEFAULT 0"
+                )
+                await db.commit()
+            except Exception:
+                pass
         await db.commit()
         await _seed_cards(db)
 
@@ -250,16 +260,84 @@ async def get_blind_session(code: str) -> dict | None:
 
 
 async def update_blind_session_join(
-    code: str, user_b: int, card_a: int, card_b: int
+    code: str, user_b: int
 ) -> bool:
     """Atomically claim an unjoined session for user_b. Returns True on success."""
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             "UPDATE blind_sessions "
-            "SET user_b = ?, card_a = ?, card_b = ?, status = 'completed' "
+            "SET user_b = ?, status = 'pending_confirmation' "
             "WHERE code = ? AND user_b IS NULL "
             "AND expires_at > datetime('now')",
-            (user_b, card_a, card_b, code),
+            (user_b, code),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def confirm_blind_session_user(code: str, user_id: int) -> dict | None:
+    """Mark one participant as confirmed and return the refreshed session."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT user_a, user_b FROM blind_sessions "
+            "WHERE code = ? AND expires_at > datetime('now')",
+            (code,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+
+        if user_id == row["user_a"]:
+            await db.execute(
+                "UPDATE blind_sessions SET confirmed_a = 1 "
+                "WHERE code = ? AND expires_at > datetime('now')",
+                (code,),
+            )
+        elif user_id == row["user_b"]:
+            await db.execute(
+                "UPDATE blind_sessions SET confirmed_b = 1 "
+                "WHERE code = ? AND expires_at > datetime('now')",
+                (code,),
+            )
+        else:
+            return None
+
+        await db.commit()
+        cursor = await db.execute(
+            "SELECT * FROM blind_sessions "
+            "WHERE code = ? AND expires_at > datetime('now')",
+            (code,),
+        )
+        refreshed = await cursor.fetchone()
+        return dict(refreshed) if refreshed else None
+
+
+async def start_blind_session_if_ready(code: str, card_a: int, card_b: int) -> bool:
+    """Lock a confirmed session for processing so the forecast starts only once."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "UPDATE blind_sessions "
+            "SET card_a = ?, card_b = ?, status = 'processing' "
+            "WHERE code = ? "
+            "AND user_b IS NOT NULL "
+            "AND confirmed_a = 1 "
+            "AND confirmed_b = 1 "
+            "AND status = 'pending_confirmation' "
+            "AND expires_at > datetime('now')",
+            (card_a, card_b, code),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def complete_blind_session(code: str) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "UPDATE blind_sessions "
+            "SET status = 'completed' "
+            "WHERE code = ? AND status = 'processing'",
+            (code,),
         )
         await db.commit()
         return cursor.rowcount > 0
