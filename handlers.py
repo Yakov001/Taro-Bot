@@ -32,6 +32,7 @@ BTN_SPREADS = "🃏 Расклады"
 BTN_PERSONAL_PREFIX = "✨ Персональные толкования"
 BTN_BLIND = "👥 Парное гадание"
 BTN_PAYMENT = "💳 Оплата"
+BTN_ADMIN = "⚙️ Админ-панель"
 BTN_BACK = "◀️ Назад"
 
 BTN_DAY = "🌅 Карта дня"
@@ -63,7 +64,9 @@ def _main_kb(is_admin: bool, ai_remaining: int = 0) -> ReplyKeyboardMarkup:
         [KeyboardButton(text=personal_text)],
         [KeyboardButton(text=BTN_BLIND)],
     ]
-    if not is_admin:
+    if is_admin:
+        rows.append([KeyboardButton(text=BTN_ADMIN)])
+    else:
         rows.append([KeyboardButton(text=BTN_PAYMENT)])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
@@ -108,6 +111,12 @@ _payment_kb = ReplyKeyboardMarkup(
 class BotStates(StatesGroup):
     waiting_for_question = State()
     waiting_for_theme_choice = State()
+    admin_grant_user = State()
+    admin_grant_amount = State()
+    admin_set_user = State()
+    admin_set_amount = State()
+    admin_reset_user = State()
+    admin_lookup_user = State()
 
 
 # ── Helpers ────────────────────────────────────────────
@@ -161,7 +170,9 @@ async def cmd_start(message: Message, command: CommandObject, bot: Bot, state: F
         await _handle_blind_join(message, bot, code)
         return
 
-    user = await db.get_or_create_user(message.from_user.id)
+    user = await db.get_or_create_user(
+        message.from_user.id, username=message.from_user.username
+    )
     await analytics.track(message.from_user.id, "bot_start")
     text = (
         "🌟 Привет! Я твой персональный таролог.\n\n"
@@ -475,7 +486,244 @@ async def on_successful_payment(message: Message) -> None:
     )
 
 
-# ── /reset (admin) ─────────────────────────────────────
+# ── Admin panel ───────────────────────────────────────
+
+_ADMIN_PANEL_KB = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
+        [InlineKeyboardButton(text="🎁 Начислить толкования", callback_data="admin:grant")],
+        [InlineKeyboardButton(text="🎯 Задать баланс", callback_data="admin:set")],
+        [InlineKeyboardButton(text="🔄 Сбросить пользователя", callback_data="admin:reset")],
+        [InlineKeyboardButton(text="👤 Найти пользователя", callback_data="admin:lookup")],
+    ]
+)
+
+
+async def _resolve_user_target(raw: str) -> dict | None:
+    """Parse admin input as @username, username, or numeric user_id."""
+    text = raw.strip()
+    if not text:
+        return None
+    # Numeric user_id
+    if text.lstrip("-").isdigit():
+        try:
+            return await db.get_user_by_id(int(text))
+        except ValueError:
+            return None
+    # Username (with or without leading @)
+    return await db.get_user_by_username(text)
+
+
+def _format_user_card(user: dict) -> str:
+    uname = user.get("username")
+    uname_line = f"@{uname}" if uname else "— нет username —"
+    return (
+        f"👤 Пользователь\n"
+        f"ID: <code>{user['user_id']}</code>\n"
+        f"Username: {uname_line}\n"
+        f"🔮 Толкований: {user['ai_requests_remaining']}\n"
+        f"🃏 Раскладов: {user['spreads_remaining']}\n"
+        f"📅 Создан: {user.get('created_at', '—')}"
+    )
+
+
+@router.message(Command("admin"))
+@router.message(F.text == BTN_ADMIN)
+async def cmd_admin_panel(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message.from_user.id):
+        await message.answer("Эта команда доступна только администратору.")
+        return
+    await state.clear()
+    await message.answer("⚙️ Админ-панель. Выбери действие:", reply_markup=_ADMIN_PANEL_KB)
+
+
+@router.callback_query(F.data == "admin:stats")
+async def cb_admin_stats(callback: CallbackQuery) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await callback.answer()
+    stats = await db.get_stats()
+    lines = [
+        "📊 <b>Статистика</b>",
+        f"Всего пользователей: {stats['total_users']}",
+        f"Раскладов сегодня: {stats['today_spreads']}",
+    ]
+    if stats["top_cards"]:
+        lines.append("\nТоп-3 карты дня:")
+        for i, card in enumerate(stats["top_cards"], 1):
+            lines.append(f"  {i}. {card['name']} — {card['count']} раз")
+    else:
+        lines.append("\nСегодня ещё не было раскладов.")
+    await callback.message.answer("\n".join(lines), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admin:grant")
+async def cb_admin_grant(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await callback.answer()
+    await state.set_state(BotStates.admin_grant_user)
+    await callback.message.answer(
+        "🎁 Кому начислить толкования?\n"
+        "Отправь @username или числовой user_id."
+    )
+
+
+@router.message(BotStates.admin_grant_user)
+async def handle_admin_grant_user(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message.from_user.id):
+        await state.clear()
+        return
+    user = await _resolve_user_target(message.text or "")
+    if not user:
+        await message.answer("❌ Пользователь не найден. Попробуй ещё раз или /admin для выхода.")
+        return
+    await state.update_data(target_id=user["user_id"])
+    await state.set_state(BotStates.admin_grant_amount)
+    await message.answer(
+        f"{_format_user_card(user)}\n\nСколько толкований начислить? (число)",
+        parse_mode="HTML",
+    )
+
+
+@router.message(BotStates.admin_grant_amount)
+async def handle_admin_grant_amount(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message.from_user.id):
+        await state.clear()
+        return
+    try:
+        amount = int((message.text or "").strip())
+    except ValueError:
+        await message.answer("❌ Нужно число. Повтори.")
+        return
+    data = await state.get_data()
+    target_id = data.get("target_id")
+    await state.clear()
+    if target_id is None:
+        await message.answer("❌ Сессия утеряна, начни заново /admin.")
+        return
+    new_balance = await db.add_ai_requests(target_id, amount)
+    await message.answer(
+        f"✅ Начислено {amount:+d}.\n"
+        f"🔮 Новый баланс пользователя {target_id}: {new_balance}"
+    )
+
+
+@router.callback_query(F.data == "admin:set")
+async def cb_admin_set(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await callback.answer()
+    await state.set_state(BotStates.admin_set_user)
+    await callback.message.answer(
+        "🎯 Кому выставить баланс?\n"
+        "Отправь @username или числовой user_id."
+    )
+
+
+@router.message(BotStates.admin_set_user)
+async def handle_admin_set_user(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message.from_user.id):
+        await state.clear()
+        return
+    user = await _resolve_user_target(message.text or "")
+    if not user:
+        await message.answer("❌ Пользователь не найден. Попробуй ещё раз или /admin для выхода.")
+        return
+    await state.update_data(target_id=user["user_id"])
+    await state.set_state(BotStates.admin_set_amount)
+    await message.answer(
+        f"{_format_user_card(user)}\n\nКакое значение баланса задать? (число)",
+        parse_mode="HTML",
+    )
+
+
+@router.message(BotStates.admin_set_amount)
+async def handle_admin_set_amount(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message.from_user.id):
+        await state.clear()
+        return
+    try:
+        amount = int((message.text or "").strip())
+    except ValueError:
+        await message.answer("❌ Нужно число. Повтори.")
+        return
+    if amount < 0:
+        await message.answer("❌ Баланс не может быть отрицательным.")
+        return
+    data = await state.get_data()
+    target_id = data.get("target_id")
+    await state.clear()
+    if target_id is None:
+        await message.answer("❌ Сессия утеряна, начни заново /admin.")
+        return
+    ok = await db.set_ai_requests(target_id, amount)
+    if ok:
+        await message.answer(f"✅ Баланс пользователя {target_id} задан: {amount}")
+    else:
+        await message.answer(f"❌ Пользователь {target_id} не найден.")
+
+
+@router.callback_query(F.data == "admin:reset")
+async def cb_admin_reset(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await callback.answer()
+    await state.set_state(BotStates.admin_reset_user)
+    await callback.message.answer(
+        "🔄 Кому сбросить счётчики (до значений по умолчанию)?\n"
+        "Отправь @username или числовой user_id."
+    )
+
+
+@router.message(BotStates.admin_reset_user)
+async def handle_admin_reset_user(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message.from_user.id):
+        await state.clear()
+        return
+    user = await _resolve_user_target(message.text or "")
+    await state.clear()
+    if not user:
+        await message.answer("❌ Пользователь не найден.")
+        return
+    ok = await db.reset_user_spreads(user["user_id"])
+    if ok:
+        await message.answer(f"✅ Счётчики пользователя {user['user_id']} сброшены.")
+    else:
+        await message.answer(f"❌ Пользователь {user['user_id']} не найден.")
+
+
+@router.callback_query(F.data == "admin:lookup")
+async def cb_admin_lookup(callback: CallbackQuery, state: FSMContext) -> None:
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await callback.answer()
+    await state.set_state(BotStates.admin_lookup_user)
+    await callback.message.answer(
+        "👤 Кого посмотреть?\n"
+        "Отправь @username или числовой user_id."
+    )
+
+
+@router.message(BotStates.admin_lookup_user)
+async def handle_admin_lookup_user(message: Message, state: FSMContext) -> None:
+    if not _is_admin(message.from_user.id):
+        await state.clear()
+        return
+    user = await _resolve_user_target(message.text or "")
+    await state.clear()
+    if not user:
+        await message.answer("❌ Пользователь не найден.")
+        return
+    await message.answer(_format_user_card(user), parse_mode="HTML")
+
+
+# ── /reset (admin, legacy CLI) ─────────────────────────
 
 @router.message(Command("reset"))
 async def cmd_reset(message: Message) -> None:
@@ -501,7 +749,7 @@ async def cmd_reset(message: Message) -> None:
         await message.answer(f"Пользователь {target_id} не найден.")
 
 
-# ── /stats (admin) ─────────────────────────────────────
+# ── /stats (admin, legacy CLI) ─────────────────────────
 
 @router.message(Command("stats"))
 async def cmd_stats(message: Message) -> None:
