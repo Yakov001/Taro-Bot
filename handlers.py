@@ -544,18 +544,64 @@ async def cb_admin_stats(callback: CallbackQuery) -> None:
         return
     await callback.answer()
     stats = await db.get_stats()
+    p_today = stats["payments_today"]
+    p_total = stats["payments_total"]
+    bal = stats["ai_balance"]
+    blind = stats["blind_sessions"]
+
     lines = [
         "📊 <b>Статистика</b>",
-        f"Всего пользователей: {stats['total_users']}",
-        f"Раскладов сегодня: {stats['today_spreads']}",
+        "",
+        f"👥 Всего пользователей: {stats['total_users']}",
+        f"🟢 Активных сегодня: {stats['active_today']}",
+        f"🃏 Карт вытянуто сегодня (расклады): {stats['today_spreads']}",
+        "",
+        "💳 <b>Платежи</b>",
+        f"  Сегодня: {p_today['count']} шт., "
+        f"{p_today['stars']}⭐, +{p_today['readings']} толк.",
+        f"  Всего: {p_total['count']} шт., "
+        f"{p_total['stars']}⭐, +{p_total['readings']} толк.",
+        "",
+        "🔮 <b>Баланс толкований</b>",
+        f"  Суммарно у пользователей: {bal['total']}",
+        f"  В среднем на пользователя: {bal['avg']}",
+        "",
+        "👥 <b>Парные гадания</b>",
+        f"  Сегодня: {blind['today']} (завершено: {blind['today_completed']})",
+        f"  Всего: {blind['total']} (завершено: {blind['total_completed']})",
     ]
     if stats["top_cards"]:
-        lines.append("\nТоп-3 карты дня:")
+        lines.append("")
+        lines.append("🏆 <b>Топ-3 карты дня</b>")
         for i, card in enumerate(stats["top_cards"], 1):
             lines.append(f"  {i}. {card['name']} — {card['count']} раз")
     else:
-        lines.append("\nСегодня ещё не было раскладов.")
+        lines.append("")
+        lines.append("Сегодня ещё не было раскладов.")
+
     await callback.message.answer("\n".join(lines), parse_mode="HTML")
+
+    # Send full snapshot to Amplitude
+    await analytics.track(
+        callback.from_user.id,
+        "admin_stats_viewed",
+        total_users=stats["total_users"],
+        active_today=stats["active_today"],
+        today_spreads=stats["today_spreads"],
+        payments_today_count=p_today["count"],
+        payments_today_stars=p_today["stars"],
+        payments_today_readings=p_today["readings"],
+        payments_total_count=p_total["count"],
+        payments_total_stars=p_total["stars"],
+        payments_total_readings=p_total["readings"],
+        ai_balance_total=bal["total"],
+        ai_balance_avg=bal["avg"],
+        blind_today=blind["today"],
+        blind_today_completed=blind["today_completed"],
+        blind_total=blind["total"],
+        blind_total_completed=blind["total_completed"],
+        top_cards=[c["name"] for c in stats["top_cards"]],
+    )
 
 
 @router.callback_query(F.data == "admin:grant")
@@ -578,7 +624,11 @@ async def handle_admin_grant_user(message: Message, state: FSMContext) -> None:
         return
     user = await _resolve_user_target(message.text or "")
     if not user:
-        await message.answer("❌ Пользователь не найден. Попробуй ещё раз или /admin для выхода.")
+        await message.answer(
+            "❌ Пользователь не найден.\n"
+            "Поиск по @username работает только для тех, кто взаимодействовал с ботом "
+            "после последнего обновления. Попробуй числовой user_id или /admin для выхода."
+        )
         return
     await state.update_data(target_id=user["user_id"])
     await state.set_state(BotStates.admin_grant_amount)
@@ -631,7 +681,11 @@ async def handle_admin_set_user(message: Message, state: FSMContext) -> None:
         return
     user = await _resolve_user_target(message.text or "")
     if not user:
-        await message.answer("❌ Пользователь не найден. Попробуй ещё раз или /admin для выхода.")
+        await message.answer(
+            "❌ Пользователь не найден.\n"
+            "Поиск по @username работает только для тех, кто взаимодействовал с ботом "
+            "после последнего обновления. Попробуй числовой user_id или /admin для выхода."
+        )
         return
     await state.update_data(target_id=user["user_id"])
     await state.set_state(BotStates.admin_set_amount)
