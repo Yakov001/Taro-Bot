@@ -3,11 +3,14 @@ import logging
 import random  # <-- Добавлен импорт
 
 from aiogram import Bot, F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
+    CallbackQuery,
     FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
     LabeledPrice,
     Message,
     PreCheckoutQuery,
@@ -17,8 +20,8 @@ from aiogram.types import (
 
 import analytics
 import db
-from config import ADMIN_USER_ID, IMAGES_DIR, PAYMENT_PACKAGES
-from yandex_gpt import interpret_spread, interpret_theme
+from config import ADMIN_USER_ID, IMAGES_DIR, PAYMENT_PACKAGES, PEEK_COST_STARS
+from yandex_gpt import generate_pair_forecast, interpret_spread, interpret_theme
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -27,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 BTN_SPREADS = "🃏 Расклады"
 BTN_PERSONAL_PREFIX = "✨ Персональные толкования"
+BTN_BLIND = "👥 Парное гадание"
 BTN_PAYMENT = "💳 Оплата"
 BTN_BACK = "◀️ Назад"
 
@@ -57,6 +61,7 @@ def _main_kb(is_admin: bool, ai_remaining: int = 0) -> ReplyKeyboardMarkup:
     rows = [
         [KeyboardButton(text=BTN_SPREADS)],
         [KeyboardButton(text=personal_text)],
+        [KeyboardButton(text=BTN_BLIND)],
     ]
     if not is_admin:
         rows.append([KeyboardButton(text=BTN_PAYMENT)])
@@ -111,17 +116,36 @@ def _is_admin(user_id: int) -> bool:
     return user_id == ADMIN_USER_ID
 
 
+_THINKING_PHASES = [
+    "🔮 Раскладываю карты...",
+    "✨ Вглядываюсь в символы...",
+    "🌙 Составляю толкование...",
+]
+
+
 async def _animate_thinking(message: Message) -> Message:
     """Send animated 'thinking' messages to build anticipation."""
-    phases = [
-        "🔮 Раскладываю карты...",
-        "✨ Вглядываюсь в символы...",
-        "🌙 Составляю толкование...",
-    ]
-    msg = await message.answer(phases[0])
-    for phase in phases[1:]:
+    msg = await message.answer(_THINKING_PHASES[0])
+    for phase in _THINKING_PHASES[1:]:
         await asyncio.sleep(2)
         await msg.edit_text(phase)
+    await asyncio.sleep(1)
+    return msg
+
+
+async def _animate_thinking_in_chat(bot: Bot, chat_id: int) -> Message | None:
+    """Same animation but in an arbitrary chat (e.g. the inviter's DM)."""
+    try:
+        msg = await bot.send_message(chat_id, _THINKING_PHASES[0])
+    except Exception:
+        logger.warning("Failed to start thinking animation for chat %s", chat_id, exc_info=True)
+        return None
+    for phase in _THINKING_PHASES[1:]:
+        await asyncio.sleep(2)
+        try:
+            await msg.edit_text(phase)
+        except Exception:
+            return msg
     await asyncio.sleep(1)
     return msg
 
@@ -129,14 +153,21 @@ async def _animate_thinking(message: Message) -> Message:
 # ── /start ─────────────────────────────────────────────
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext) -> None:
+async def cmd_start(message: Message, command: CommandObject, bot: Bot, state: FSMContext) -> None:
     await state.clear()
+    args = (command.args or "").strip()
+    if args.startswith("blind_"):
+        code = args[len("blind_"):].upper()
+        await _handle_blind_join(message, bot, code)
+        return
+
     user = await db.get_or_create_user(message.from_user.id)
     await analytics.track(message.from_user.id, "bot_start")
     text = (
         "🌟 Привет! Я твой персональный таролог.\n\n"
         "🃏 Расклады — карта дня и расклад 3 карты\n"
-        "✨ Персональные толкования — расклад по вопросу или теме\n\n"
+        "✨ Персональные толкования — расклад по вопросу или теме\n"
+        "👥 Парное гадание — по одной карте каждому из двоих\n\n"
         f"🔮 Осталось персональных толкований: {user['ai_requests_remaining']}"
     )
     await message.answer(text, reply_markup=_main_kb(_is_admin(message.from_user.id), user['ai_requests_remaining']))
@@ -367,6 +398,24 @@ async def on_pre_checkout(pre_checkout_query: PreCheckoutQuery) -> None:
     payload = pre_checkout_query.invoice_payload
     parts = payload.split(":")
 
+    # Peek payment: peek:{code}:{user_id}
+    if parts[0] == "peek" and len(parts) == 3:
+        try:
+            user_id = int(parts[2])
+        except ValueError:
+            await pre_checkout_query.answer(ok=False, error_message="Неверный формат.")
+            return
+        session = await db.get_blind_session(parts[1])
+        if (
+            session
+            and session["status"] == "completed"
+            and user_id in (session["user_a"], session["user_b"])
+        ):
+            await pre_checkout_query.answer(ok=True)
+        else:
+            await pre_checkout_query.answer(ok=False, error_message="Сессия недействительна или истекла.")
+        return
+
     # Validate payload format and package existence
     if len(parts) == 2 and parts[0] in PAYMENT_PACKAGES:
         await pre_checkout_query.answer(ok=True)
@@ -380,6 +429,11 @@ async def on_successful_payment(message: Message) -> None:
     payment = message.successful_payment
     payload = payment.invoice_payload
     parts = payload.split(":")
+
+    # Peek payment: peek:{code}:{user_id}
+    if parts[0] == "peek" and len(parts) == 3:
+        await _handle_peek_payment(message, payment, parts[1], int(parts[2]))
+        return
 
     if len(parts) != 2 or parts[0] not in PAYMENT_PACKAGES:
         logger.error("Unknown payment payload: %s", payload)
@@ -533,6 +587,231 @@ async def _animate_drawing(message: Message, card_number: int) -> Message:
 
     await asyncio.sleep(0.8)  # Небольшая пауза перед показом карты
     return msg
+
+
+async def _send_card_to_chat(bot: Bot, chat_id: int, card: dict, caption: str) -> bool:
+    """Same image-cache fallback as _send_card_image, but for arbitrary chat_id."""
+    if card.get("file_id"):
+        try:
+            await bot.send_photo(chat_id=chat_id, photo=card["file_id"], caption=caption)
+            return True
+        except Exception:
+            logger.warning("Stale file_id for card %s, falling back", card["id"])
+
+    image_path = IMAGES_DIR / card["image_url"]
+    if image_path.exists():
+        try:
+            photo = FSInputFile(str(image_path))
+            result = await bot.send_photo(chat_id=chat_id, photo=photo, caption=caption)
+            new_file_id = result.photo[-1].file_id
+            await db.update_card_file_id(card["id"], new_file_id)
+            return True
+        except Exception:
+            logger.warning("Failed to send image for card %s", card["id"], exc_info=True)
+
+    return False
+
+
+# ── Blind Pair Tarot ───────────────────────────────────
+
+def _peek_kb(code: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(
+                text=f"🔍 Подсмотреть карту партнёра ({PEEK_COST_STARS}⭐)",
+                callback_data=f"peek_{code}",
+            )
+        ]]
+    )
+
+
+@router.message(F.text == BTN_BLIND)
+async def menu_blind(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await analytics.track(message.from_user.id, "menu_blind")
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="🆕 Создать сессию", callback_data="create_blind"),
+        ]]
+    )
+    await message.answer(
+        "👥 Парное гадание\n\n"
+        "Создай сессию и отправь другу ссылку — каждый вытянет свою карту, "
+        "а я дам общий прогноз на ваши отношения.\n\n"
+        "💫 Стоимость: 1 персональное толкование.\n"
+        "🔍 Карту партнёра можно подсмотреть за ⭐ Stars.",
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(F.data == "create_blind")
+async def cb_create_blind(callback: CallbackQuery, bot: Bot) -> None:
+    user_id = callback.from_user.id
+    await db.get_or_create_user(user_id)
+
+    # Gate on AI balance (admin unlimited)
+    if not _is_admin(user_id):
+        remaining = await db.get_ai_remaining(user_id)
+        if remaining <= 0:
+            await callback.answer()
+            await analytics.track(user_id, "ai_limit_reached", source="blind_create")
+            await callback.message.answer(
+                "❌ У тебя закончились персональные толкования.\n"
+                "🃏 Обычный расклад доступен всегда!\n"
+                "💳 Пополни баланс в разделе «Оплата»"
+            )
+            return
+
+    try:
+        code = await db.create_blind_session(user_id)
+    except RuntimeError:
+        await callback.answer("Не удалось создать сессию. Попробуй ещё раз.", show_alert=True)
+        return
+
+    new_balance: int | None = None
+    if not _is_admin(user_id):
+        new_balance = await db.decrement_ai_requests(user_id)
+
+    me = await bot.get_me()
+    link = f"https://t.me/{me.username}?start=blind_{code}"
+    await analytics.track(user_id, "blind_create", code=code, balance_after=new_balance)
+    await callback.answer()
+    balance_line = f"\n\n🔮 Осталось толкований: {new_balance}" if new_balance is not None else ""
+    await callback.message.answer(
+        f"✅ Сессия создана!\n\n"
+        f"🔗 Отправь другу ссылку:\n{link}\n\n"
+        f"⏰ Действует 24 часа.{balance_line}"
+    )
+
+
+async def _handle_blind_join(message: Message, bot: Bot, code: str) -> None:
+    """User B opens the bot via deep-link. Validate, draw cards, notify both."""
+    user_b_id = message.from_user.id
+    await db.get_or_create_user(user_b_id)
+
+    session = await db.get_blind_session(code)
+    if not session:
+        await message.answer("⏰ Сессия не найдена или истекла. Попроси друга создать новую.")
+        return
+    if session["user_a"] == user_b_id:
+        await message.answer("❌ Нельзя гадать самому с собой — отправь ссылку другу.")
+        return
+    if session["user_b"] is not None:
+        if session["user_b"] == user_b_id:
+            await message.answer("Ты уже присоединился к этой сессии.")
+        else:
+            await message.answer("К этой сессии уже присоединился другой игрок.")
+        return
+
+    cards = await db.get_random_cards(2)
+    if len(cards) < 2:
+        await message.answer("Ошибка: недостаточно карт в колоде.")
+        return
+    card_a, card_b = cards[0], cards[1]
+
+    joined = await db.update_blind_session_join(code, user_b_id, card_a["id"], card_b["id"])
+    if not joined:
+        await message.answer("⏰ Сессия уже занята другим игроком или истекла.")
+        return
+
+    user_a_id = session["user_a"]
+    await analytics.track(user_b_id, "blind_join", code=code)
+
+    # Animate "thinking" in both chats in parallel
+    thinking_b, thinking_a = await asyncio.gather(
+        _animate_thinking(message),
+        _animate_thinking_in_chat(bot, user_a_id),
+    )
+    forecast = await generate_pair_forecast(card_a, card_b)
+    for m in (thinking_b, thinking_a):
+        if m is None:
+            continue
+        try:
+            await m.delete()
+        except Exception:
+            pass
+    if not forecast:
+        forecast = "✨ Карты сплетаются в необычный узор — прислушайтесь друг к другу."
+
+    kb = _peek_kb(code)
+
+    # Send to user A
+    caption_a = f"🃏 Твоя карта: {card_a['name']}\n\n{card_a['meaning_short']}"
+    try:
+        sent_a = await _send_card_to_chat(bot, user_a_id, card_a, caption_a)
+        if not sent_a:
+            await bot.send_message(user_a_id, caption_a)
+        await bot.send_message(
+            user_a_id,
+            f"💞 Общий прогноз для вас двоих:\n\n{forecast}",
+            reply_markup=kb,
+        )
+    except Exception:
+        logger.warning("Failed to notify user_a=%s of blind session %s", user_a_id, code, exc_info=True)
+
+    # Send to user B (via message — same chat)
+    caption_b = f"🃏 Твоя карта: {card_b['name']}\n\n{card_b['meaning_short']}"
+    sent_b = await _send_card_image(message, card_b, caption_b)
+    if not sent_b:
+        await message.answer(caption_b)
+    await message.answer(
+        f"💞 Общий прогноз для вас двоих:\n\n{forecast}",
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(F.data.startswith("peek_"))
+async def cb_peek(callback: CallbackQuery, bot: Bot) -> None:
+    code = callback.data[len("peek_"):]
+    user_id = callback.from_user.id
+
+    session = await db.get_blind_session(code)
+    if not session:
+        await callback.answer("⏰ Сессия истекла.", show_alert=True)
+        return
+    if user_id not in (session["user_a"], session["user_b"]):
+        await callback.answer("❌ Эта сессия не твоя.", show_alert=True)
+        return
+    if session["status"] != "completed":
+        await callback.answer("Сессия ещё не завершена.", show_alert=True)
+        return
+
+    await callback.answer()
+    await analytics.track(user_id, "blind_peek_invoice", code=code)
+    await bot.send_invoice(
+        chat_id=callback.message.chat.id,
+        title="Карта партнёра",
+        description="Подсмотреть карту, которую вытянул твой партнёр.",
+        payload=f"peek:{code}:{user_id}",
+        currency="XTR",
+        prices=[LabeledPrice(label="Карта партнёра", amount=PEEK_COST_STARS)],
+    )
+
+
+async def _handle_peek_payment(message: Message, payment, code: str, user_id: int) -> None:
+    session = await db.get_blind_session(code)
+    if not session or user_id not in (session["user_a"], session["user_b"]):
+        logger.error("Peek payment for invalid session: code=%s user=%s", code, user_id)
+        await message.answer("Оплата получена, но сессия недоступна. Напишите администратору.")
+        return
+
+    partner_card_id = session["card_b"] if user_id == session["user_a"] else session["card_a"]
+    card = await db.get_card_by_id(partner_card_id)
+    if not card:
+        await message.answer("Карта не найдена. Напишите администратору.")
+        return
+
+    charge_id = payment.telegram_payment_charge_id or ""
+    await db.log_payment(user_id, f"peek:{code}", PEEK_COST_STARS, 0, charge_id)
+    await analytics.track(
+        user_id, "blind_peek_paid",
+        code=code, card_name=card["name"], stars=PEEK_COST_STARS,
+    )
+
+    caption = f"🔍 Карта партнёра: {card['name']}\n\n{card['meaning_short']}"
+    sent = await _send_card_image(message, card, caption)
+    if not sent:
+        await message.answer(caption)
 
 
 async def _send_spread_cards(message: Message, cards: list[dict], user_id: int) -> None:
