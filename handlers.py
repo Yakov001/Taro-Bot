@@ -625,6 +625,143 @@ def _peek_kb(code: str) -> InlineKeyboardMarkup:
     )
 
 
+def _blind_confirm_kb(code: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="Подтвердить", callback_data=f"blind_confirm_{code}"),
+        ]]
+    )
+
+
+def _format_partner_name(chat) -> str:
+    if chat is None:
+        return "Ваш партнёр"
+
+    parts = [getattr(chat, "first_name", None), getattr(chat, "last_name", None)]
+    full_name = " ".join(part for part in parts if part).strip()
+    if full_name:
+        return full_name
+    username = getattr(chat, "username", None)
+    if username:
+        return f"@{username}"
+    return "Ваш партнёр"
+
+
+async def _send_blind_confirmation_prompt(
+    bot: Bot,
+    chat_id: int,
+    partner_id: int,
+    code: str,
+    intro_text: str,
+) -> None:
+    kb = _blind_confirm_kb(code)
+    partner_chat = None
+    try:
+        partner_chat = await bot.get_chat(partner_id)
+    except Exception:
+        logger.warning("Failed to fetch partner chat %s", partner_id, exc_info=True)
+
+    partner_name = _format_partner_name(partner_chat)
+    text = (
+        f"{intro_text}\n\n"
+        f"Партнёр для парного расклада: {partner_name}\n\n"
+        "Нажми «Подтвердить», чтобы подтвердить участие. "
+        "Расклад начнётся только после подтверждения обоих участников."
+    )
+
+    photo_file_id = None
+    try:
+        photos = await bot.get_user_profile_photos(partner_id, limit=1)
+        if photos.photos:
+            photo_file_id = photos.photos[0][-1].file_id
+    except Exception:
+        logger.warning("Failed to fetch profile photo for partner %s", partner_id, exc_info=True)
+
+    if photo_file_id:
+        try:
+            await bot.send_photo(chat_id=chat_id, photo=photo_file_id, caption=text, reply_markup=kb)
+            return
+        except Exception:
+            logger.warning("Failed to send confirmation photo to chat %s", chat_id, exc_info=True)
+
+    await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+
+
+async def _start_blind_reading(
+    bot: Bot,
+    code: str,
+    user_a_id: int,
+    user_b_id: int,
+    trigger_message: Message | None = None,
+) -> None:
+    cards = await db.get_random_cards(2)
+    if len(cards) < 2:
+        if trigger_message is not None:
+            await trigger_message.answer("Ошибка: недостаточно карт в колоде.")
+        else:
+            await bot.send_message(user_b_id, "Ошибка: недостаточно карт в колоде.")
+        return
+
+    card_a, card_b = cards[0], cards[1]
+    started = await db.start_blind_session_if_ready(code, card_a["id"], card_b["id"])
+    if not started:
+        return
+
+    thinking_a, thinking_b = await asyncio.gather(
+        _animate_thinking_in_chat(bot, user_a_id),
+        _animate_thinking_in_chat(bot, user_b_id),
+    )
+    forecast = await generate_pair_forecast(card_a, card_b)
+    for item in (thinking_a, thinking_b):
+        if item is None:
+            continue
+        try:
+            await item.delete()
+        except Exception:
+            pass
+    if not forecast:
+        forecast = "✨ Карты сплетаются в необычный узор — прислушайтесь друг к другу."
+
+    kb = _peek_kb(code)
+
+    caption_a = f"🃏 Твоя карта: {card_a['name']}\n\n{card_a['meaning_short']}"
+    try:
+        sent_a = await _send_card_to_chat(bot, user_a_id, card_a, caption_a)
+        if not sent_a:
+            await bot.send_message(user_a_id, caption_a)
+        await bot.send_message(
+            user_a_id,
+            f"💞 Общий прогноз для вас двоих:\n\n{forecast}",
+            reply_markup=kb,
+        )
+    except Exception:
+        logger.warning("Failed to notify user_a=%s of blind session %s", user_a_id, code, exc_info=True)
+
+    caption_b = f"🃏 Твоя карта: {card_b['name']}\n\n{card_b['meaning_short']}"
+    try:
+        if trigger_message is not None and trigger_message.chat.id == user_b_id:
+            sent_b = await _send_card_image(trigger_message, card_b, caption_b)
+            if not sent_b:
+                await trigger_message.answer(caption_b)
+            await trigger_message.answer(
+                f"💞 Общий прогноз для вас двоих:\n\n{forecast}",
+                reply_markup=kb,
+            )
+        else:
+            sent_b = await _send_card_to_chat(bot, user_b_id, card_b, caption_b)
+            if not sent_b:
+                await bot.send_message(user_b_id, caption_b)
+            await bot.send_message(
+                user_b_id,
+                f"💞 Общий прогноз для вас двоих:\n\n{forecast}",
+                reply_markup=kb,
+            )
+    except Exception:
+        logger.warning("Failed to notify user_b=%s of blind session %s", user_b_id, code, exc_info=True)
+
+    await db.complete_blind_session(code)
+
+
 @router.message(F.text == BTN_BLIND)
 async def menu_blind(message: Message, state: FSMContext) -> None:
     await state.clear()
@@ -684,7 +821,7 @@ async def cb_create_blind(callback: CallbackQuery, bot: Bot) -> None:
     )
 
 
-async def _handle_blind_join(message: Message, bot: Bot, code: str) -> None:
+async def _handle_blind_join_legacy(message: Message, bot: Bot, code: str) -> None:
     """User B opens the bot via deep-link. Validate, draw cards, notify both."""
     user_b_id = message.from_user.id
     await db.get_or_create_user(user_b_id)
@@ -758,6 +895,105 @@ async def _handle_blind_join(message: Message, bot: Bot, code: str) -> None:
         f"💞 Общий прогноз для вас двоих:\n\n{forecast}",
         reply_markup=kb,
     )
+
+
+async def _handle_blind_join(message: Message, bot: Bot, code: str) -> None:
+    """User B opens the bot via deep-link and both participants confirm before start."""
+    user_b_id = message.from_user.id
+    await db.get_or_create_user(user_b_id)
+
+    session = await db.get_blind_session(code)
+    if not session:
+        await message.answer("Сессия не найдена или истекла. Попроси друга создать новую.")
+        return
+    if session["user_a"] == user_b_id:
+        await message.answer("Нельзя гадать самому с собой. Отправь ссылку другу.")
+        return
+    if session["user_b"] is not None:
+        if session["user_b"] == user_b_id:
+            if session["status"] == "completed":
+                await message.answer("Ты уже присоединился к этой сессии. Расклад уже готов.")
+            elif session["status"] == "processing":
+                await message.answer("Расклад уже запускается. Подожди ещё немного.")
+            else:
+                await message.answer(
+                    "Ты уже присоединился к этой сессии. Подтверди участие кнопкой ниже, если ещё не подтвердил.",
+                    reply_markup=_blind_confirm_kb(code),
+                )
+        else:
+            await message.answer("К этой сессии уже присоединился другой игрок.")
+        return
+
+    joined = await db.update_blind_session_join(code, user_b_id)
+    if not joined:
+        await message.answer("Сессия уже занята другим игроком или истекла.")
+        return
+
+    user_a_id = session["user_a"]
+    await analytics.track(user_b_id, "blind_join", code=code)
+    await _send_blind_confirmation_prompt(
+        bot,
+        user_a_id,
+        user_b_id,
+        code,
+        "В сессию для парного расклада вошёл второй участник.",
+    )
+    await _send_blind_confirmation_prompt(
+        bot,
+        user_b_id,
+        user_a_id,
+        code,
+        "Сессия для парного расклада создана.",
+    )
+
+
+@router.callback_query(F.data.startswith("blind_confirm_"))
+async def cb_blind_confirm(callback: CallbackQuery, bot: Bot) -> None:
+    code = callback.data[len("blind_confirm_"):]
+    user_id = callback.from_user.id
+
+    session = await db.get_blind_session(code)
+    if not session:
+        await callback.answer("Сессия не найдена или истекла.", show_alert=True)
+        return
+    if user_id not in (session["user_a"], session["user_b"]):
+        await callback.answer("Это не ваша сессия.", show_alert=True)
+        return
+    if session["user_b"] is None:
+        await callback.answer("Нужно дождаться второго участника.", show_alert=True)
+        return
+    if session["status"] == "completed":
+        await callback.answer("Расклад уже завершён.", show_alert=True)
+        return
+    if session["status"] == "processing":
+        await callback.answer("Расклад уже запускается.", show_alert=True)
+        return
+
+    updated = await db.confirm_blind_session_user(code, user_id)
+    if not updated:
+        await callback.answer("Не удалось подтвердить участие.", show_alert=True)
+        return
+
+    is_user_a = user_id == updated["user_a"]
+    partner_confirmed = bool(updated["confirmed_b"] if is_user_a else updated["confirmed_a"])
+
+    await callback.answer("Участие подтверждено.")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    if partner_confirmed:
+        await callback.message.answer("Оба участника подтвердили участие. Запускаю парный расклад.")
+        await _start_blind_reading(
+            bot,
+            code,
+            updated["user_a"],
+            updated["user_b"],
+            trigger_message=callback.message if callback.message.chat.id == updated["user_b"] else None,
+        )
+    else:
+        await callback.message.answer("Подтверждение получено. Ждём второго участника.")
 
 
 @router.callback_query(F.data.startswith("peek_"))
