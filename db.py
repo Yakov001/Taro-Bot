@@ -55,8 +55,17 @@ async def init_db() -> None:
             )
         """)
         await db.execute("""
+            CREATE TABLE IF NOT EXISTS blind_invites (
+                invite_code TEXT PRIMARY KEY,
+                owner_user_id INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP NOT NULL
+            )
+        """)
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS blind_sessions (
                 code TEXT PRIMARY KEY,
+                invite_code TEXT,
                 user_a INTEGER NOT NULL,
                 user_b INTEGER,
                 card_a INTEGER,
@@ -68,10 +77,14 @@ async def init_db() -> None:
                 expires_at TIMESTAMP NOT NULL
             )
         """)
-        for column in ("confirmed_a", "confirmed_b"):
+        for column, definition in (
+            ("invite_code", "TEXT"),
+            ("confirmed_a", "INTEGER DEFAULT 0"),
+            ("confirmed_b", "INTEGER DEFAULT 0"),
+        ):
             try:
                 await db.execute(
-                    f"ALTER TABLE blind_sessions ADD COLUMN {column} INTEGER DEFAULT 0"
+                    f"ALTER TABLE blind_sessions ADD COLUMN {column} {definition}"
                 )
                 await db.commit()
             except Exception:
@@ -228,22 +241,85 @@ async def get_card_by_id(card_id: int) -> dict | None:
 _BLIND_CODE_ALPHABET = string.ascii_uppercase + string.digits
 
 
-async def create_blind_session(user_a: int) -> str:
-    """Generate a unique 4-char code and persist the session. 24h TTL."""
+async def _generate_blind_code(db: aiosqlite.Connection) -> str:
+    for _ in range(20):
+        code = "".join(secrets.choice(_BLIND_CODE_ALPHABET) for _ in range(4))
+        cursor = await db.execute(
+            "SELECT 1 FROM blind_invites WHERE invite_code = ? "
+            "UNION SELECT 1 FROM blind_sessions WHERE code = ?",
+            (code, code),
+        )
+        if not await cursor.fetchone():
+            return code
+    raise RuntimeError("Could not generate unique blind code")
+
+
+async def create_blind_invite(owner_user_id: int) -> str:
+    """Always create a fresh invite code valid for 24h."""
     async with aiosqlite.connect(DB_PATH) as db:
-        for _ in range(20):
-            code = "".join(secrets.choice(_BLIND_CODE_ALPHABET) for _ in range(4))
-            try:
-                await db.execute(
-                    "INSERT INTO blind_sessions (code, user_a, expires_at) "
-                    "VALUES (?, ?, datetime('now', '+24 hours'))",
-                    (code, user_a),
-                )
-                await db.commit()
-                return code
-            except aiosqlite.IntegrityError:
-                continue
-        raise RuntimeError("Could not generate unique blind session code")
+        code = await _generate_blind_code(db)
+        await db.execute(
+            "UPDATE blind_invites SET expires_at = datetime('now') "
+            "WHERE owner_user_id = ? AND expires_at > datetime('now')",
+            (owner_user_id,),
+        )
+        await db.execute(
+            "INSERT INTO blind_invites (invite_code, owner_user_id, expires_at) "
+            "VALUES (?, ?, datetime('now', '+24 hours'))",
+            (code, owner_user_id),
+        )
+        await db.commit()
+        return code
+
+
+async def get_blind_invite(invite_code: str) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM blind_invites "
+            "WHERE invite_code = ? AND expires_at > datetime('now')",
+            (invite_code,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def create_blind_session_from_invite(
+    invite_code: str, owner_user_id: int, friend_user_id: int
+) -> str:
+    return await create_direct_blind_session(owner_user_id, friend_user_id, invite_code)
+
+
+async def create_direct_blind_session(
+    user_a: int, user_b: int, invite_code: str | None = None
+) -> str:
+    async with aiosqlite.connect(DB_PATH) as db:
+        code = await _generate_blind_code(db)
+        await db.execute(
+            "INSERT INTO blind_sessions "
+            "(code, invite_code, user_a, user_b, status, expires_at) "
+            "VALUES (?, ?, ?, ?, 'pending_confirmation', datetime('now', '+24 hours'))",
+            (code, invite_code, user_a, user_b),
+        )
+        await db.commit()
+        return code
+
+
+async def find_incomplete_pair_session(
+    owner_user_id: int, friend_user_id: int
+) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM blind_sessions "
+            "WHERE user_a = ? AND user_b = ? "
+            "AND status IN ('pending_confirmation', 'processing') "
+            "AND expires_at > datetime('now') "
+            "ORDER BY created_at DESC LIMIT 1",
+            (owner_user_id, friend_user_id),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
 
 
 async def get_blind_session(code: str) -> dict | None:
@@ -257,22 +333,6 @@ async def get_blind_session(code: str) -> dict | None:
         )
         row = await cursor.fetchone()
         return dict(row) if row else None
-
-
-async def update_blind_session_join(
-    code: str, user_b: int
-) -> bool:
-    """Atomically claim an unjoined session for user_b. Returns True on success."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            "UPDATE blind_sessions "
-            "SET user_b = ?, status = 'pending_confirmation' "
-            "WHERE code = ? AND user_b IS NULL "
-            "AND expires_at > datetime('now')",
-            (user_b, code),
-        )
-        await db.commit()
-        return cursor.rowcount > 0
 
 
 async def confirm_blind_session_user(code: str, user_id: int) -> dict | None:
@@ -341,6 +401,29 @@ async def complete_blind_session(code: str) -> bool:
         )
         await db.commit()
         return cursor.rowcount > 0
+
+
+async def reject_blind_session(code: str) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "UPDATE blind_sessions "
+            "SET status = 'rejected' "
+            "WHERE code = ? AND status = 'pending_confirmation' "
+            "AND expires_at > datetime('now')",
+            (code,),
+        )
+        await db.commit()
+        if cursor.rowcount <= 0:
+            return None
+
+        cursor = await db.execute(
+            "SELECT * FROM blind_sessions "
+            "WHERE code = ? AND expires_at > datetime('now')",
+            (code,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
 
 
 async def get_stats() -> dict:
