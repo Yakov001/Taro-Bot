@@ -478,9 +478,17 @@ async def get_stats() -> dict:
         total_users = (await cursor.fetchone())["cnt"]
 
         cursor = await db.execute(
-            "SELECT COUNT(*) as cnt FROM draw_log WHERE draw_type='spread' AND DATE(created_at)=DATE('now')"
+            "SELECT COUNT(*) as cnt FROM draw_log "
+            "WHERE draw_type='spread' AND DATE(created_at)=DATE('now')"
         )
         today_spreads = (await cursor.fetchone())["cnt"]
+
+        # Active users today: unique users who pulled any card today
+        cursor = await db.execute(
+            "SELECT COUNT(DISTINCT user_id) as cnt FROM draw_log "
+            "WHERE DATE(created_at)=DATE('now')"
+        )
+        active_today = (await cursor.fetchone())["cnt"]
 
         cursor = await db.execute("""
             SELECT tc.name, COUNT(*) as cnt
@@ -493,8 +501,76 @@ async def get_stats() -> dict:
         """)
         top_cards = [{"name": row["name"], "count": row["cnt"]} for row in await cursor.fetchall()]
 
+        # Payments: today
+        cursor = await db.execute(
+            "SELECT COUNT(*) as cnt, "
+            "COALESCE(SUM(stars_amount), 0) as stars, "
+            "COALESCE(SUM(readings_granted), 0) as readings "
+            "FROM payments WHERE DATE(created_at)=DATE('now')"
+        )
+        row = await cursor.fetchone()
+        payments_today = {
+            "count": row["cnt"],
+            "stars": row["stars"],
+            "readings": row["readings"],
+        }
+
+        # Payments: all-time
+        cursor = await db.execute(
+            "SELECT COUNT(*) as cnt, "
+            "COALESCE(SUM(stars_amount), 0) as stars, "
+            "COALESCE(SUM(readings_granted), 0) as readings "
+            "FROM payments"
+        )
+        row = await cursor.fetchone()
+        payments_total = {
+            "count": row["cnt"],
+            "stars": row["stars"],
+            "readings": row["readings"],
+        }
+
+        # AI balance pool
+        cursor = await db.execute(
+            "SELECT COALESCE(SUM(ai_requests_remaining), 0) as total, "
+            "COALESCE(AVG(ai_requests_remaining), 0) as avg "
+            "FROM users"
+        )
+        row = await cursor.fetchone()
+        ai_balance = {
+            "total": row["total"],
+            "avg": round(row["avg"], 2),
+        }
+
+        # Blind sessions
+        cursor = await db.execute(
+            "SELECT COUNT(*) as cnt FROM blind_sessions "
+            "WHERE DATE(created_at)=DATE('now')"
+        )
+        blind_today = (await cursor.fetchone())["cnt"]
+        cursor = await db.execute(
+            "SELECT COUNT(*) as cnt FROM blind_sessions "
+            "WHERE DATE(created_at)=DATE('now') AND status = 'completed'"
+        )
+        blind_today_completed = (await cursor.fetchone())["cnt"]
+        cursor = await db.execute("SELECT COUNT(*) as cnt FROM blind_sessions")
+        blind_total = (await cursor.fetchone())["cnt"]
+        cursor = await db.execute(
+            "SELECT COUNT(*) as cnt FROM blind_sessions WHERE status = 'completed'"
+        )
+        blind_total_completed = (await cursor.fetchone())["cnt"]
+
         return {
             "total_users": total_users,
             "today_spreads": today_spreads,
+            "active_today": active_today,
             "top_cards": top_cards,
+            "payments_today": payments_today,
+            "payments_total": payments_total,
+            "ai_balance": ai_balance,
+            "blind_sessions": {
+                "today": blind_today,
+                "today_completed": blind_today_completed,
+                "total": blind_total,
+                "total_completed": blind_total_completed,
+            },
         }

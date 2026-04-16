@@ -6,7 +6,7 @@ from aiogram import Bot, Dispatcher
 from config import BOT_TOKEN
 from db import init_db
 from handlers import router
-from middlewares import AntifloodMiddleware
+from middlewares import AntifloodMiddleware, UsernameSyncMiddleware
 
 
 async def main() -> None:
@@ -23,6 +23,10 @@ async def main() -> None:
 
     antiflood = AntifloodMiddleware()
     dp.message.middleware(antiflood)
+
+    username_sync = UsernameSyncMiddleware()
+    dp.message.middleware(username_sync)
+    dp.callback_query.middleware(username_sync)
 
     dp.include_router(router)
 
