@@ -647,6 +647,30 @@ def _format_partner_name(chat) -> str:
     return "Ваш партнёр"
 
 
+def _blind_confirm_kb_v2(code: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="Подтвердить", callback_data=f"blind_confirm_{code}"),
+            InlineKeyboardButton(text="Отклонить", callback_data=f"blind_reject_{code}"),
+        ]]
+    )
+
+
+def _blind_result_kb(code: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(
+                text="Повторить парное гадание",
+                callback_data=f"blind_replay_{code}",
+            )],
+            [InlineKeyboardButton(
+                text=f"🔍 Подсмотреть карту партнёра ({PEEK_COST_STARS}⭐)",
+                callback_data=f"peek_{code}",
+            )],
+        ]
+    )
+
+
 async def _send_blind_confirmation_prompt(
     bot: Bot,
     chat_id: int,
@@ -654,7 +678,7 @@ async def _send_blind_confirmation_prompt(
     code: str,
     intro_text: str,
 ) -> None:
-    kb = _blind_confirm_kb(code)
+    kb = _blind_confirm_kb_v2(code)
     partner_chat = None
     try:
         partner_chat = await bot.get_chat(partner_id)
@@ -722,7 +746,7 @@ async def _start_blind_reading(
     if not forecast:
         forecast = "✨ Карты сплетаются в необычный узор — прислушайтесь друг к другу."
 
-    kb = _peek_kb(code)
+    kb = _blind_result_kb(code)
 
     caption_a = f"🃏 Твоя карта: {card_a['name']}\n\n{card_a['meaning_short']}"
     try:
@@ -800,19 +824,23 @@ async def cb_create_blind(callback: CallbackQuery, bot: Bot) -> None:
             return
 
     try:
-        code = await db.create_blind_session(user_id)
+        code = await db.create_blind_invite(user_id)
     except RuntimeError:
         await callback.answer("Не удалось создать сессию. Попробуй ещё раз.", show_alert=True)
         return
 
-    new_balance: int | None = None
-    if not _is_admin(user_id):
-        new_balance = await db.decrement_ai_requests(user_id)
-
     me = await bot.get_me()
     link = f"https://t.me/{me.username}?start=blind_{code}"
-    await analytics.track(user_id, "blind_create", code=code, balance_after=new_balance)
+    await analytics.track(user_id, "blind_create", code=code)
     await callback.answer()
+    await callback.message.answer(
+        f"Ссылка для парного гадания готова!\n\n"
+        f"Отправь другу ссылку:\n{link}\n\n"
+        "Эту ссылку можно пересылать нескольким друзьям.\n"
+        "Каждый друг создаст с тобой отдельную сессию парного гадания.\n\n"
+        "Ссылка действует 24 часа."
+    )
+    return
     balance_line = f"\n\n🔮 Осталось толкований: {new_balance}" if new_balance is not None else ""
     await callback.message.answer(
         f"✅ Сессия создана!\n\n"
@@ -821,7 +849,7 @@ async def cb_create_blind(callback: CallbackQuery, bot: Bot) -> None:
     )
 
 
-async def _handle_blind_join_legacy(message: Message, bot: Bot, code: str) -> None:
+async def _handle_blind_join_legacy_v1(message: Message, bot: Bot, code: str) -> None:
     """User B opens the bot via deep-link. Validate, draw cards, notify both."""
     user_b_id = message.from_user.id
     await db.get_or_create_user(user_b_id)
@@ -897,7 +925,7 @@ async def _handle_blind_join_legacy(message: Message, bot: Bot, code: str) -> No
     )
 
 
-async def _handle_blind_join(message: Message, bot: Bot, code: str) -> None:
+async def _handle_blind_join_legacy_v2(message: Message, bot: Bot, code: str) -> None:
     """User B opens the bot via deep-link and both participants confirm before start."""
     user_b_id = message.from_user.id
     await db.get_or_create_user(user_b_id)
@@ -947,6 +975,329 @@ async def _handle_blind_join(message: Message, bot: Bot, code: str) -> None:
     )
 
 
+async def _create_blind_session_for_pair(
+    bot: Bot,
+    initiator_user_id: int,
+    partner_user_id: int,
+    invite_code: str | None = None,
+    analytics_event: str = "blind_join",
+) -> str | None:
+    if not _is_admin(initiator_user_id):
+        initiator_balance = await db.get_ai_remaining(initiator_user_id)
+        if initiator_balance <= 0:
+            return None
+
+    existing_session = await db.find_incomplete_pair_session(initiator_user_id, partner_user_id)
+    if existing_session:
+        return ""
+
+    try:
+        session_code = await db.create_direct_blind_session(
+            initiator_user_id, partner_user_id, invite_code=invite_code
+        )
+    except RuntimeError:
+        return None
+
+    balance_after = None
+    if not _is_admin(initiator_user_id):
+        balance_after = await db.decrement_ai_requests(initiator_user_id)
+
+    await analytics.track(
+        initiator_user_id,
+        analytics_event,
+        code=session_code,
+        invite_code=invite_code,
+        partner_user_id=partner_user_id,
+    )
+    await _send_blind_confirmation_prompt(
+        bot,
+        initiator_user_id,
+        partner_user_id,
+        session_code,
+        "Сессия для парного расклада создана.",
+    )
+    await _send_blind_confirmation_prompt(
+        bot,
+        partner_user_id,
+        initiator_user_id,
+        session_code,
+        "В сессию для парного расклада вошёл второй участник.",
+    )
+
+    if balance_after is not None:
+        try:
+            await bot.send_message(
+                initiator_user_id,
+                f"🔮 Осталось персональных толкований: {balance_after}",
+            )
+        except Exception:
+            logger.warning(
+                "Failed to notify initiator=%s about blind balance",
+                initiator_user_id,
+                exc_info=True,
+            )
+
+    return session_code
+
+
+async def _handle_blind_join(message: Message, bot: Bot, code: str) -> None:
+    """User B opens a reusable invite and creates a dedicated pair session."""
+    user_b_id = message.from_user.id
+    await db.get_or_create_user(user_b_id)
+
+    invite = await db.get_blind_invite(code)
+    if not invite:
+        await message.answer("Ссылка для парного гадания не найдена или истекла. Попроси друга создать новую.")
+        return
+
+    owner_user_id = invite["owner_user_id"]
+    if owner_user_id == user_b_id:
+        await message.answer("Нельзя гадать самому с собой. Отправь ссылку другу.")
+        return
+
+    existing_session = await db.find_incomplete_pair_session(owner_user_id, user_b_id)
+    if existing_session:
+        await message.answer("По этой ссылке вы уже создали парное гадание. Повторно присоединиться нельзя.")
+        return
+
+    if not _is_admin(owner_user_id):
+        owner_balance = await db.get_ai_remaining(owner_user_id)
+        if owner_balance <= 0:
+            await message.answer("У владельца ссылки закончились персональные толкования. Попроси его пополнить баланс.")
+            try:
+                await bot.send_message(
+                    owner_user_id,
+                    "Кто-то открыл твою ссылку на парное гадание, но у тебя закончились персональные толкования.",
+                )
+            except Exception:
+                logger.warning("Failed to notify owner=%s about blind invite balance", owner_user_id, exc_info=True)
+            return
+
+    try:
+        session_code = await db.create_blind_session_from_invite(code, owner_user_id, user_b_id)
+    except RuntimeError:
+        await message.answer("Не удалось создать сессию парного гадания. Попробуй ещё раз.")
+        return
+
+    balance_after = None
+    if not _is_admin(owner_user_id):
+        balance_after = await db.decrement_ai_requests(owner_user_id)
+
+    await analytics.track(user_b_id, "blind_join", code=session_code, invite_code=code)
+    await _send_blind_confirmation_prompt(
+        bot,
+        owner_user_id,
+        user_b_id,
+        session_code,
+        "В сессию для парного расклада вошёл второй участник.",
+    )
+    await _send_blind_confirmation_prompt(
+        bot,
+        user_b_id,
+        owner_user_id,
+        session_code,
+        "Сессия для парного расклада создана.",
+    )
+
+    if balance_after is not None:
+        try:
+            await bot.send_message(
+                owner_user_id,
+                f"🔮 Осталось персональных толкований: {balance_after}",
+            )
+        except Exception:
+            logger.warning("Failed to notify owner=%s about blind balance", owner_user_id, exc_info=True)
+
+
+async def _create_blind_session_for_pair_v2(
+    bot: Bot,
+    initiator_user_id: int,
+    partner_user_id: int,
+    invite_code: str | None = None,
+    analytics_event: str = "blind_join",
+) -> str | None:
+    if not _is_admin(initiator_user_id):
+        initiator_balance = await db.get_ai_remaining(initiator_user_id)
+        if initiator_balance <= 0:
+            return None
+
+    existing_session = await db.find_incomplete_pair_session(initiator_user_id, partner_user_id)
+    if existing_session:
+        return ""
+
+    try:
+        session_code = await db.create_direct_blind_session(
+            initiator_user_id, partner_user_id, invite_code=invite_code
+        )
+    except RuntimeError:
+        return None
+
+    balance_after = None
+    if not _is_admin(initiator_user_id):
+        balance_after = await db.decrement_ai_requests(initiator_user_id)
+
+    await analytics.track(
+        initiator_user_id,
+        analytics_event,
+        code=session_code,
+        invite_code=invite_code,
+        partner_user_id=partner_user_id,
+    )
+    await _send_blind_confirmation_prompt(
+        bot,
+        initiator_user_id,
+        partner_user_id,
+        session_code,
+        "Сессия для парного расклада создана.",
+    )
+    await _send_blind_confirmation_prompt(
+        bot,
+        partner_user_id,
+        initiator_user_id,
+        session_code,
+        "В сессию для парного расклада вошёл второй участник.",
+    )
+
+    if balance_after is not None:
+        try:
+            await bot.send_message(
+                initiator_user_id,
+                f"🔮 Осталось персональных толкований: {balance_after}",
+            )
+        except Exception:
+            logger.warning(
+                "Failed to notify initiator=%s about blind balance",
+                initiator_user_id,
+                exc_info=True,
+            )
+
+    return session_code
+
+
+async def _handle_blind_join(message: Message, bot: Bot, code: str) -> None:
+    """User B opens a reusable invite and creates a dedicated pair session."""
+    user_b_id = message.from_user.id
+    await db.get_or_create_user(user_b_id)
+
+    invite = await db.get_blind_invite(code)
+    if not invite:
+        await message.answer("Ссылка для парного гадания не найдена или истекла. Попроси друга создать новую.")
+        return
+
+    owner_user_id = invite["owner_user_id"]
+    if owner_user_id == user_b_id:
+        await message.answer("Нельзя гадать самому с собой. Отправь ссылку другу.")
+        return
+
+    session_code = await _create_blind_session_for_pair_v2(
+        bot,
+        initiator_user_id=owner_user_id,
+        partner_user_id=user_b_id,
+        invite_code=code,
+        analytics_event="blind_join",
+    )
+    if session_code == "":
+        await message.answer("У вас уже есть незавершённая сессия парного гадания. Сначала завершите её или дождитесь, пока она истечёт.")
+        return
+    if session_code is None:
+        if not _is_admin(owner_user_id):
+            owner_balance = await db.get_ai_remaining(owner_user_id)
+            if owner_balance <= 0:
+                await message.answer("У владельца ссылки закончились персональные толкования. Попроси его пополнить баланс.")
+                try:
+                    await bot.send_message(
+                        owner_user_id,
+                        "Кто-то открыл твою ссылку на парное гадание, но у тебя закончились персональные толкования.",
+                    )
+                except Exception:
+                    logger.warning("Failed to notify owner=%s about blind invite balance", owner_user_id, exc_info=True)
+                return
+        await message.answer("Не удалось создать сессию парного гадания. Попробуй ещё раз.")
+        return
+
+    await analytics.track(user_b_id, "blind_join_target", code=session_code, invite_code=code)
+
+
+@router.callback_query(F.data.startswith("blind_reject_"))
+async def cb_blind_reject(callback: CallbackQuery, bot: Bot) -> None:
+    code = callback.data[len("blind_reject_"):]
+    user_id = callback.from_user.id
+
+    session = await db.get_blind_session(code)
+    if not session:
+        await callback.answer("Сессия не найдена или истекла.", show_alert=True)
+        return
+    if user_id not in (session["user_a"], session["user_b"]):
+        await callback.answer("Это не ваша сессия.", show_alert=True)
+        return
+    if session["status"] == "completed":
+        await callback.answer("Расклад уже завершён.", show_alert=True)
+        return
+    if session["status"] == "processing":
+        await callback.answer("Расклад уже запускается.", show_alert=True)
+        return
+    if session["status"] == "rejected":
+        await callback.answer("Сессия уже отклонена.", show_alert=True)
+        return
+
+    rejected = await db.reject_blind_session(code)
+    if not rejected:
+        await callback.answer("Не удалось отклонить сессию.", show_alert=True)
+        return
+
+    await callback.answer("Сессия отклонена.")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    partner_id = rejected["user_b"] if user_id == rejected["user_a"] else rejected["user_a"]
+    await callback.message.answer("Ты отклонил(а) сессию парного толкования.")
+    try:
+        await bot.send_message(partner_id, "Партнёр отклонил сессию парного толкования.")
+    except Exception:
+        logger.warning("Failed to notify partner=%s about blind rejection", partner_id, exc_info=True)
+
+
+@router.callback_query(F.data.startswith("blind_replay_"))
+async def cb_blind_replay(callback: CallbackQuery, bot: Bot) -> None:
+    code = callback.data[len("blind_replay_"):]
+    user_id = callback.from_user.id
+
+    session = await db.get_blind_session(code)
+    if not session:
+        await callback.answer("Сессия не найдена или истекла.", show_alert=True)
+        return
+    if user_id not in (session["user_a"], session["user_b"]):
+        await callback.answer("Это не ваша сессия.", show_alert=True)
+        return
+    if session["status"] != "completed":
+        await callback.answer("Новое толкование можно начать только после завершённой сессии.", show_alert=True)
+        return
+
+    partner_id = session["user_b"] if user_id == session["user_a"] else session["user_a"]
+    new_session_code = await _create_blind_session_for_pair_v2(
+        bot,
+        initiator_user_id=user_id,
+        partner_user_id=partner_id,
+        analytics_event="blind_replay",
+    )
+    if new_session_code == "":
+        await callback.answer("У вас уже есть незавершённая сессия с этим пользователем.", show_alert=True)
+        return
+    if new_session_code is None:
+        if not _is_admin(user_id):
+            remaining = await db.get_ai_remaining(user_id)
+            if remaining <= 0:
+                await callback.answer("У тебя закончились персональные толкования.", show_alert=True)
+                return
+        await callback.answer("Не удалось создать новую сессию.", show_alert=True)
+        return
+
+    await callback.answer("Новая сессия создана.")
+    await callback.message.answer("Запросил(а) новое парное толкование с тем же пользователем. Ждём подтверждения обоих.")
+
+
 @router.callback_query(F.data.startswith("blind_confirm_"))
 async def cb_blind_confirm(callback: CallbackQuery, bot: Bot) -> None:
     code = callback.data[len("blind_confirm_"):]
@@ -967,6 +1318,10 @@ async def cb_blind_confirm(callback: CallbackQuery, bot: Bot) -> None:
         return
     if session["status"] == "processing":
         await callback.answer("Расклад уже запускается.", show_alert=True)
+        return
+
+    if session["status"] == "rejected":
+        await callback.answer("Сессия была отклонена.", show_alert=True)
         return
 
     updated = await db.confirm_blind_session_user(code, user_id)
