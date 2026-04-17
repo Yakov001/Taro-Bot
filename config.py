@@ -21,7 +21,6 @@ FLOOD_RATE_LIMIT = 60
 FLOOD_WINDOW_SECONDS = 20
 FLOOD_BAN_SECONDS = 300
 
-DEFAULT_SPREADS = 5
 DEFAULT_AI_REQUESTS = 3
 
 # ── Blind Pair Tarot ─────────────────────────────────
