@@ -3,7 +3,7 @@ import string
 
 import aiosqlite
 
-from config import DB_PATH, DEFAULT_SPREADS, DEFAULT_AI_REQUESTS
+from config import DB_PATH, DEFAULT_AI_REQUESTS
 from cards_data import TAROT_CARDS
 
 
@@ -12,7 +12,6 @@ async def init_db() -> None:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
-                spreads_remaining INTEGER DEFAULT 5,
                 ai_requests_remaining INTEGER DEFAULT 3,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -31,6 +30,12 @@ async def init_db() -> None:
             await db.commit()
         except Exception:
             pass
+        # Migration: drop legacy spreads_remaining column if still present
+        try:
+            await db.execute("ALTER TABLE users DROP COLUMN spreads_remaining")
+            await db.commit()
+        except Exception:
+            pass  # column already removed or unsupported SQLite
         await db.execute("""
             CREATE TABLE IF NOT EXISTS tarot_cards (
                 id INTEGER PRIMARY KEY,
@@ -189,18 +194,6 @@ async def log_draw(user_id: int, card_id: int, draw_type: str) -> None:
         await db.commit()
 
 
-async def decrement_spreads(user_id: int) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE users SET spreads_remaining = spreads_remaining - 1 WHERE user_id = ? AND spreads_remaining > 0",
-            (user_id,),
-        )
-        await db.commit()
-        cursor = await db.execute("SELECT spreads_remaining FROM users WHERE user_id = ?", (user_id,))
-        (remaining,) = await cursor.fetchone()
-        return remaining
-
-
 async def get_ai_remaining(user_id: int) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
@@ -225,11 +218,12 @@ async def decrement_ai_requests(user_id: int) -> int:
         return remaining
 
 
-async def reset_user_spreads(user_id: int) -> bool:
+async def reset_user_ai(user_id: int) -> bool:
+    """Reset a user's AI-requests balance to the default."""
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "UPDATE users SET spreads_remaining = ?, ai_requests_remaining = ? WHERE user_id = ?",
-            (DEFAULT_SPREADS, DEFAULT_AI_REQUESTS, user_id),
+            "UPDATE users SET ai_requests_remaining = ? WHERE user_id = ?",
+            (DEFAULT_AI_REQUESTS, user_id),
         )
         await db.commit()
         return cursor.rowcount > 0
@@ -366,6 +360,32 @@ async def find_incomplete_pair_session(
         return dict(row) if row else None
 
 
+async def find_rejected_pair_session(
+    owner_user_id: int,
+    friend_user_id: int,
+    invite_code: str | None = None,
+) -> dict | None:
+    """Return a rejected session between this pair (optionally scoped to an
+    invite_code) so the invite link cannot be reused after a refusal.
+    """
+    query = (
+        "SELECT * FROM blind_sessions "
+        "WHERE ((user_a = ? AND user_b = ?) OR (user_a = ? AND user_b = ?)) "
+        "AND status = 'rejected'"
+    )
+    params: tuple = (owner_user_id, friend_user_id, friend_user_id, owner_user_id)
+    if invite_code is not None:
+        query += " AND invite_code = ?"
+        params = params + (invite_code,)
+    query += " ORDER BY created_at DESC LIMIT 1"
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(query, params)
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
 async def get_blind_session(code: str) -> dict | None:
     """Return session row if it exists and has not expired, else None."""
     async with aiosqlite.connect(DB_PATH) as db:
@@ -420,6 +440,7 @@ async def confirm_blind_session_user(code: str, user_id: int) -> dict | None:
 async def start_blind_session_if_ready(code: str, card_a: int, card_b: int) -> bool:
     """Lock a confirmed session for processing so the forecast starts only once."""
     async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "UPDATE blind_sessions "
             "SET card_a = ?, card_b = ?, status = 'processing' "
@@ -431,8 +452,26 @@ async def start_blind_session_if_ready(code: str, card_a: int, card_b: int) -> b
             "AND expires_at > datetime('now')",
             (card_a, card_b, code),
         )
+        locked = cursor.rowcount > 0
+        if locked:
+            # Log both participants' draws so blind cards roll up into
+            # stats: active users, today_spreads, top cards.
+            cursor = await db.execute(
+                "SELECT user_a, user_b FROM blind_sessions WHERE code = ?",
+                (code,),
+            )
+            row = await cursor.fetchone()
+            if row:
+                await db.executemany(
+                    "INSERT INTO draw_log (user_id, card_id, draw_type) "
+                    "VALUES (?, ?, 'spread')",
+                    [
+                        (row["user_a"], card_a),
+                        (row["user_b"], card_b),
+                    ],
+                )
         await db.commit()
-        return cursor.rowcount > 0
+        return locked
 
 
 async def complete_blind_session(code: str) -> bool:
